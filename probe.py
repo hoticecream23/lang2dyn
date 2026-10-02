@@ -4,7 +4,7 @@ random-init model (same probe), and "observables" (probes fed the ground-truth s
 
 python probe.py [ckpt=ckpt/num.pt] [n_episodes=3000] [pool=end|mean]
 """
-import os, sys, time
+import functools, os, sys, time
 import numpy as np, torch
 from sklearn.linear_model import RidgeCV
 from sklearn.neural_network import MLPRegressor
@@ -16,7 +16,8 @@ PROBE_SEED = 20_000_000
 TARGETS = ["x", "v", "a", "F", "log_m", "mu"]
 MAX_SPANS = 24  # observables history slots
 STATED_DIGITS = {"num": 2, "nat": 1, "sym": 2}  # decimals each channel states x and v with
-# qual and rel state no numbers; their observables baselines (bins, comparison codes) are not built, so they are skipped
+CODE_CHANNELS = ("qual", "rel")  # no numbers: observables are the parsed bins / comparison codes, one-hot
+VOCAB_SEED = 40_000_000
 CEIL_SEED = 30_000_000
 # two sizes, to see whether the ceiling has saturated. CEIL="" skips it (smoke tests); CEIL=5000,50000,200000 adds sizes
 CEIL_EPISODES = tuple(int(k) for k in os.environ.get("CEIL", "5000,50000").split(",") if k)
@@ -75,9 +76,48 @@ def targets(eps, channel):
     return np.array(ys), np.array(meta)
 
 
+def stated_codes(channel, sentence, first):
+    """What a qual/rel sentence states, as a set of "key=value" strings, read with the channel's own parser."""
+    if channel == "qual":
+        z = sim.parse_qual(sentence)
+    else:
+        z = sim.parse_rel_first(sentence) if first else sim.parse_rel(sentence)
+    return {f"{k}={v}" for k, v in z.items()}
+
+
+@functools.cache
+def code_vocab(channel):
+    """All codes seen in 3000 episodes -> one-hot index. ponytail: codes never seen there are dropped."""
+    vocab = set()
+    for s in range(VOCAB_SEED, VOCAB_SEED + 3000):
+        t = sim.make_episode(s)["texts"][channel]
+        for i, (s0, s1, _) in enumerate(t["spans"]):
+            vocab |= stated_codes(channel, t["text"][s0:s1], i == 0)
+    return {c: i for i, c in enumerate(sorted(vocab))}
+
+
+def code_observables(eps, channel):
+    """Per span: the latest stated value of every key (so once-stated facts like the mass bin sit in fixed slots),
+    then each sentence's codes, most recent first, zero-padded to MAX_SPANS slots."""
+    vocab = code_vocab(channel)
+    onehot = lambda cs: np.bincount([vocab[c] for c in cs if c in vocab], minlength=len(vocab))
+    rows = []
+    for e in eps:
+        t, hist, latest = e["texts"][channel], [], {}
+        for i, (s0, s1, _) in enumerate(t["spans"]):
+            codes = stated_codes(channel, t["text"][s0:s1], i == 0)
+            latest.update({c.split("=")[0]: c for c in codes})
+            hist.append(np.concatenate([[1.0], onehot(codes)]))
+            assert len(hist) <= MAX_SPANS
+            rows.append(np.concatenate([onehot(latest.values()), *hist[::-1], np.zeros((MAX_SPANS - len(hist)) * (len(vocab) + 1))]))
+    return np.array(rows, dtype=np.float32)
+
+
 def observables(eps, channel):
     """Stated values (t, x, v, F) of every span so far, at the precision the channel states them, most recent first, zero-padded to MAX_SPANS slots.
-    This is everything the channel gives the model, minus the formatting."""
+    This is everything the channel gives the model, minus the formatting. qual/rel: see code_observables."""
+    if channel in CODE_CHANNELS:
+        return code_observables(eps, channel)
     rows, d = [], STATED_DIGITS[channel]
     for e in eps:
         tr, hist = e["traj"], []
@@ -149,7 +189,7 @@ def main():
     feats = residuals(model, eps, stoi, channel, pool)
     runs = [("trained ridge", feats, ridge), ("trained mlp", feats, mlp),
             ("random-init ridge", residuals(rand, eps, stoi, channel, pool), ridge)]
-    has_obs = channel in STATED_DIGITS
+    has_obs = channel in STATED_DIGITS or channel in CODE_CHANNELS
     if has_obs:
         runs += [("observables ridge", [observables(eps, channel)], ridge), ("observables mlp", [observables(eps, channel)], mlp)]
     for name, f, make in runs:

@@ -190,9 +190,10 @@ Reading:
 
 ## Channel facts (`rel`, `sym`, added 2026-10-02)
 
-- `rel` states only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, and push starts/stops/reverses/stronger/weaker. A push's direction appears only relative to the motion ("with/against its motion"). There are no numbers and **no times**. m and mu are not identifiable, so `rel` is a negative control for the hidden-parameter probes. Thresholds: `SAME_V = SAME_X = 0.05`.
+- `rel` states only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, and push starts/stops/reverses/stronger/weaker. A push's direction appears only relative to the motion ("with/against its motion"). There are no numbers and **no times**. m and mu are not identifiable, but `rel` still carries partial information about them: a ridge on its stated codes gets log_m about 0.2 (400 episodes), probably because heavy carts get stuck more often. So the negative control is "trained probe ≤ `rel` ceiling", not "probe ≈ 0". Thresholds: `SAME_V = SAME_X = 0.05`.
 - `sym` is `num` under a fixed random character substitution, spaces included. It has the same spans and lengths as `num`. For a from-scratch char model it should match `num`, so it's a sanity check. It matters only for pretrained models.
-- `probe.py` skips the observables and ceiling rows for `qual` and `rel` (no numeric baseline yet). `CEIL=""` skips the ceiling for smoke tests; `CEIL=5000,50000,200000` sets the sizes.
+- Observables for `qual` and `rel` (`probe.code_observables`): each sentence is read with the channel's own parser into one-hot "key=value" codes (qual 23 codes, rel 24). Each row holds the latest value of every key, plus the per-sentence history, most recent first. A ridge on 400 episodes gives `qual` log_m 0.88 (the mass bin is stated) and F 0.96. `CEIL=""` skips the ceiling for smoke tests; `CEIL=5000,50000,200000` sets the sizes.
+- The `qual` and `rel` parsers now also return the motion direction, change word and start/stop event (`qual`), and the push-vs-motion relation plus the first sentence (`rel`, via `parse_rel_first`). All are checked in `_checks()`.
 
 ## Known issues and open questions
 

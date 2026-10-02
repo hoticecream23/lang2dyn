@@ -175,6 +175,14 @@ def parse_qual(sentence):
         z["speed"] = "still"
     elif mo := re.search(r"at a (slow|steady|fast) pace", sentence):
         z["speed"] = mo[1]
+    if mo := re.search(r"moves to the (left|right) at a|starts moving to the (left|right)", sentence):
+        z["dir"] = mo[1] or mo[2]
+    if mo := re.search(r"speeds up (?:slowly|quickly)|slows down (?:gently|sharply)|keeps its pace", sentence):
+        z["change"] = mo[0]
+    if "starts moving" in sentence:
+        z["event"] = "start"
+    elif "halts" in sentence or "to a stop" in sentence:
+        z["event"] = "stop"
     return z
 
 
@@ -262,6 +270,8 @@ def rel_codes(tr, r, prev):
     if "force_change" in tr["events"][r]:
         z["push"] = ("stops" if F == 0 else "starts" if Fp == 0 else "reverses" if sign(F) != sign(Fp)
                      else "stronger" if abs(F) > abs(Fp) else "weaker")
+        if z["push"] == "starts" and v:
+            z["with"] = sign(F) == sign(v)
     if "stop" in tr["events"][r]:
         z["motion"] = "stops"
     elif "start" in tr["events"][r]:
@@ -317,6 +327,10 @@ def parse_rel(sentence):
                    ("stronger", "grows stronger"), ("weaker", "grows weaker")]:
         if pat in sentence:
             z["push"] = k
+    if "push starts with its motion" in sentence:
+        z["with"] = True
+    elif "push starts against its motion" in sentence:
+        z["with"] = False
     for k, pat in [("stops", "comes to rest"), ("starts", "starts moving"), ("rest", "stays at rest")]:
         if pat in sentence:
             z["motion"] = k
@@ -327,6 +341,13 @@ def parse_rel(sentence):
         if pat in sentence:
             z["x"] = k
     return z
+
+
+def parse_rel_first(sentence):
+    """The first rel sentence: whether the cart moves, and the push relative to the motion."""
+    push = ("none" if "Nothing pushes" in sentence else "with" if "with its motion" in sentence
+            else "against" if "against its motion" in sentence else "present")
+    return {"moving": "A cart is moving" in sentence, "push0": push}
 
 
 # ---- sym ----
@@ -404,8 +425,21 @@ def _checks():
             z = parse_num(num["text"][s0:s1])
             assert z["t"] == tr["t"][r] and z["F"] == tr["F"][r]
             assert abs(z["x"] - tr["x"][r]) <= 0.005 + 1e-9 and abs(z["v"] - tr["v"][r]) <= 0.005 + 1e-9
+        prev = 0
         for s0, s1, r in qual["spans"]:
             z = parse_qual(qual["text"][s0:s1])
+            ev = tr["events"][r]
+            if "dir" in z:
+                assert z["dir"] == side(tr["a"][r] if "start" in ev else tr["v"][r])
+            if r > 0:
+                assert z.get("event") == ("stop" if "stop" in ev else "start" if "start" in ev else None)
+            if "change" in z:
+                ds = abs(tr["v"][r]) - abs(tr["v"][prev])
+                fast = abs(ds) / (tr["t"][r] - tr["t"][prev]) > 1.0
+                assert z["change"] == ("keeps its pace" if abs(ds) < 0.1 else
+                                       f"speeds up {'quickly' if fast else 'slowly'}" if ds > 0 else
+                                       f"slows down {'sharply' if fast else 'gently'}")
+            prev = r
             if "mass" in z:
                 assert r == 0 and z["mass"] == mass_bin(e["params"]["m"])
             if "force" in z:
@@ -426,6 +460,9 @@ def _checks():
             else:
                 assert "F" not in z
         rel, prev = e["texts"]["rel"], 0
+        v0, F0 = tr["v"][0], tr["F"][0]
+        assert parse_rel_first(rel["text"][slice(*rel["spans"][0][:2])]) == {
+            "moving": v0 != 0, "push0": "none" if F0 == 0 else "present" if not v0 else "with" if sign(F0) == sign(v0) else "against"}
         for s0, s1, r in rel["spans"][1:]:  # the first sentence states only rest/moving and push/no push
             assert parse_rel(rel["text"][s0:s1]) == rel_codes(tr, r, prev), (seed, r, rel["text"][s0:s1])
             prev = r

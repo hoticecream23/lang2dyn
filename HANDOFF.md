@@ -25,7 +25,7 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 ## Next steps, in order
 
-1. Train and probe `rel` and `sym` (both built and checked) at 45k steps. `sym` should match `num` (sanity check). `rel` should fail on m and mu (negative control). Add a comparison-code observables baseline for `rel` and a binned one for `qual`.
+1. Train and probe `rel` and `sym` (both built and checked) at 45k steps. `sym` should match `num` (sanity check). `rel` should fail on m and mu (negative control). The `qual`/`rel` observables baselines are built. Run the `rel` ceiling with `CEIL=5000,50000`. `rel` carries partial m information (ridge log_m about 0.2), so judge the negative control against that, not against 0. Then train `qual`.
 2. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
 3. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
 4. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
