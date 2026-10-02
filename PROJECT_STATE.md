@@ -15,6 +15,8 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 | `project_idea.md` | Original idea and novelty analysis (LLM-generated citations, unverified) | reference |
 | `Simulator_Verbalizer_Spec.md` | Spec v0: simulator, channels, information map, splits, episode record | current |
 | `sim.py` | Phase-1 simulator, `num` + `qual` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
+| `train.py` | Char-level GPT (6 layers, d=256, 4.9M params), one episode per sequence, writes `ckpt/<channel>.pt` | working |
+| `probe.py` | Ridge probes on the residual stream at span-end tokens, trained vs random-init, identifiability split | working |
 | `PROJECT_STATE.md` | This file | |
 | `HANDOFF.md` | How to resume in a new chat | |
 
@@ -38,7 +40,32 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 - The surface template RNG is seeded with `f"{seed}-surface"`.
 - Commands: `python sim.py` runs the self-checks. `python sim.py N out.jsonl` writes N episodes.
 
+## Results
+
+### Run 1: `num` channel, 2026-10-01
+
+Setup: 100k train episodes (seeds 0..99999), 5000 steps at batch 64 (about 3.2 epochs), AdamW lr 1e-3 cosine, bf16, RTX 3070 Ti Laptop GPU, 873 s. Validation loss 3.29 → 0.294, still falling at the end. Probes: 3000 episodes (seeds 20M+), split 75/25 by episode, RidgeCV on standardized features, read at the last token of each span.
+
+Best-layer R² (trained vs random-init):
+
+| | x | v | a | F | log_m | mu |
+|---|---|---|---|---|---|---|
+| trained | 0.77 (L3) | 0.70 (L3) | 0.57 (L4) | 0.86 (L5) | 0.44 (L4) | 0.16 (L6) |
+| random-init | 0.50 | 0.46 | 0.09 | 0.24 | 0.15 | 0.05 |
+
+Late spans (step ≥ 25), trained model: log_m R² is 0.50 on identifiable episodes vs 0.34 on non-identifiable. mu R² is 0.11 on identifiable vs 0.32 on non-identifiable (reversed).
+
+Reading:
+- Positive signal: the unstated variables a and m decode far above the random-init baseline.
+- The probe readout is weak even for stated variables (x and v reach only about 0.75), so the linear probe at the "." token is not near its ceiling.
+- Random-init already reaches R² 0.15 for log_m. Observable correlates leak mass information (light carts reach larger |v| and |x|).
+- The identifiability control is confounded. The flag is joint, but a coast-only episode identifies mu without m, which likely explains why mu is reversed. The non-identifiable subset is also small (about 80 episodes).
+
 ## Known issues and open questions
+
+- The identifiability flag needs to be split into separate flags for m and mu (see run 1).
+- The probe ceiling is unknown. Needed: an MLP probe, and an "observables baseline" that regresses the targets directly from ground-truth stated values (x, v, F history up to the span). That baseline separates "the model computed it" from "it is linearly present in the stated numbers".
+- The run 1 model is undertrained (loss still falling).
 
 - `qual` repeats "It stays still." during long stuck stretches. This inflates token counts (the length confound). It could be collapsed into one sentence.
 - `qual` reports "a gentle push starts" when the force changes within the same bin. This is intended information loss, but worth noting in the paper.
@@ -49,5 +76,5 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 
 - Verbalizers: `nat`, `rel`, `sym`, and the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
 - Dataset splits: `iid`, `ood-combo`, `ood-extrap`, `compose`, `cross-channel`. The `ood-combo` and `ood-extrap` splits need param-region filtering in `sample_params` or at dataset-build time.
-- Tokenizer (shared BPE, digits split), training script, probes, and the interchange intervention code.
+- BPE tokenizer (needed once `nat` exists; `num` uses char-level) and the interchange intervention code.
 - Phase 2: collisions.
