@@ -7,20 +7,27 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 - The idea has been reviewed and the key design decisions are made (see `PROJECT_STATE.md`, "Decisions made").
 - Spec v0 is written.
 - The phase-1 simulator plus the `num` and `qual` verbalizers work. `python sim.py` passes all checks.
-- Identifiability is now flagged separately for m and mu.
-- The `num`-only pipeline runs end to end. With an MLP probe, run 1 decodes the unstated variable a at R² 0.80 and log_m at 0.51. mu stays weak at 0.14. The observables baselines (the key comparison) have not finished a run yet.
-- **We are moving training to cloud compute.** The local run 2 (15k steps) was stopped at step 7000. Only `ckpt/num_run1.pt` and `ckpt/num.pt` exist locally (identical, both gitignored).
+- Identifiability is flagged separately for m and mu.
+- **Run 2 (`num`, 15k steps, RunPod RTX 4090) passed the decision gate for mass.** A linear probe on the trained model decodes log_m at R² 0.61, while a linear probe on the stated numbers gets 0.02 and the nonlinear ceiling is 0.64. Acceleration and mu are not evidence of computation (see `PROJECT_STATE.md`, "Results").
+- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt` (gitignored).
+
+## Compute: RunPod
+
+- SSH key: `~/.ssh/id_ed25519_runpod` (registered in RunPod settings).
+- Code lives in `/workspace/lang2dyn` on the pod. The pod uses an externally managed Python, so install with `pip install --break-system-packages scikit-learn psutil`. torch comes with the template.
+- Set `OMP_NUM_THREADS=8` (the pod sees 256 host cores but only has 8 vCPUs).
+- Copy code: `git archive HEAD sim.py train.py probe.py requirements.txt | ssh -p <PORT> -i ~/.ssh/id_ed25519_runpod root@<IP> 'mkdir -p /workspace/lang2dyn && tar -x -C /workspace/lang2dyn'`
+- Run long jobs inside `tmux` and copy results back with `scp -P <PORT>`.
+- Use the "SSH over exposed TCP" address (root@IP -p PORT). The proxied `ssh.runpod.io` address can't copy files.
+- The IP and port change with each pod. Delete pods when you're done (stopped pods still bill for disk).
 
 ## Next steps, in order
 
-1. **Cloud setup.**
-   - Done: checkpoint/resume in `train.py` (atomic save every 500 steps to `ckpt/<channel>_state.pt`; rerun the same command to resume) and `requirements.txt`.
-   - Push the repo to a remote the cloud machine can pull from.
-2. **Run 2 on cloud:** `python train.py num 100000 15000`, then `python probe.py ckpt/num.pt 3000`. Record the results in `PROJECT_STATE.md`.
-   - The key check: does the trained model's probe clearly beat the observables baseline on a and log_m? If yes, the signal is real, so move to step 3. If no, fix the probing method first.
-3. Add the `nat`, `rel` and `sym` verbalizers, each with a parser and a round-trip check in `_checks()`. `nat` will need a BPE tokenizer.
-4. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
-5. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins.
+1. Add the `nat`, `rel` and `sym` verbalizers, each with a parser and a round-trip check in `_checks()`. `nat` will need a BPE tokenizer.
+   - Fix the `qual` block-size overflow, then train `qual` too. Both channels exist already, so this is the first cross-channel comparison.
+2. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
+3. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
+4. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
 
 ## Prompt to paste into a new chat
 
@@ -28,4 +35,4 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 ## Maintenance
 
-At the end of each session, update `PROJECT_STATE.md` (decisions, facts, results, issues, not-built list) and the "Where we are" and "Next steps" sections of this file.
+At the end of each session, update `PROJECT_STATE.md` (decisions, facts, results, issues, not-built list) and the "Where we are", "Compute" and "Next steps" sections of this file.

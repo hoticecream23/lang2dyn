@@ -73,13 +73,38 @@ The run was stopped before the observables baselines finished. Best layer per ta
 
 Reading: much of the weak linear readout was a limit of the linear probe. With the MLP, stated values reach about 0.9 and a reaches 0.80. mu stays weak under every probe. Still missing: the observables baselines, which are the key comparison.
 
-### Run 2: 15k steps (aborted)
+### Run 2: `num` channel, 15k steps on RunPod (2026-10-02)
 
-Stopped at step 7000 (validation loss 0.2656, vs 0.294 at the end of run 1) to move to cloud compute. No checkpoint was saved. `ckpt/num_run1.pt` is a copy of the run 1 checkpoint.
+Setup: same as run 1 but 15k steps, on an RTX 4090 (283 s training, about 30× faster than the laptop). Validation loss 0.2309 (run 1: 0.294). Checkpoint `ckpt/num_run2.pt`, full log `train_probe_run2.log` (both gitignored). A first local attempt was aborted at step 7000.
+
+Best layer per target:
+
+| | x | v | a | F | log_m | mu |
+|---|---|---|---|---|---|---|
+| trained ridge | 0.79 | 0.68 | 0.65 | 0.87 | **0.61** | 0.22 |
+| trained MLP | 0.92 | 0.90 | 0.85 | 0.96 | 0.62 | 0.20 |
+| random-init ridge | 0.50 | 0.46 | 0.09 | 0.24 | 0.15 | 0.05 |
+| observables ridge | 1.00 | 1.00 | 0.75 | 1.00 | **0.02** | 0.03 |
+| observables MLP (ceiling) | 1.00 | 1.00 | 0.88 | 1.00 | 0.64 | 0.18 |
+
+Late spans (step ≥ 25), split by each parameter's own flag:
+
+| | log_m id | log_m non-id | mu id | mu non-id |
+|---|---|---|---|---|
+| trained ridge | 0.67 | 0.39 | 0.21 | 0.31 |
+| observables MLP | 0.75 | 0.51 | 0.20 | 0.29 |
+
+Reading:
+- **Mass is the headline result.** A linear probe on the trained model gets log_m R² 0.61. A linear probe on the stated numbers gets 0.02. So the model has computed a nonlinear function of the text (mass from dynamics) and stores it linearly, close to the nonlinear ceiling of 0.64.
+- **Acceleration is not evidence of computation.** a is nearly linear in the stated values (Δv/Δt with a mostly fixed Δt), so the observables ridge already reaches 0.75. The trained MLP (0.85) is near the ceiling (0.88).
+- **mu is limited by the data, not the model.** Even the observables MLP reaches only 0.18. The trained model matches that ceiling.
+- **The identifiability gaps are a data property.** The log_m id > non-id gap and the reversed mu gap both appear in the observables ceiling too, so they come from the data, not from the model. Non-identifiable episodes still carry partial information (stiction bounds, the parameter range). The non-id subset is small (about 70 episodes).
+- **Decision gate passed for mass:** the trained model clearly beats the linear observables baseline. Move on to more channels.
 
 ## Known issues and open questions
 
-- mu is weakly represented under every probe. Possible causes: an undertrained model, mu's small effect on the dynamics (mu·g ≤ 2.94 m/s²), or entanglement with m.
+- mu has a low decodability ceiling, even from stated values with an MLP (0.18). Possible causes: mu's small effect on the dynamics (mu·g ≤ 2.94 m/s²), the confound with m, or MLP baseline capacity and data size. Worth checking with a closed-form estimator from the trajectory as a true ceiling.
+- Why non-identifiable episodes show higher mu R² than identifiable ones is unexplained (seen in the ceiling too).
 - `qual` texts exceed the 512-token block in `train.py` (assertion in `encode`). Raise the block size or shorten `qual` (for example, collapse repeated "It stays still.") before training on it.
 
 - `qual` repeats "It stays still." during long stuck stretches. This inflates token counts (the length confound). It could be collapsed into one sentence.
