@@ -1,7 +1,8 @@
 """Probes on the residual stream at span-end tokens, against two kinds of baseline:
 random-init model (same probe), and "observables" (probes fed the ground-truth stated values directly).
+"ceiling" rows: a GPU MLP on observables from many fresh episodes, the best decoder we have from the stated values.
 
-python probe.py [ckpt=ckpt/num.pt] [n_episodes=3000]
+python probe.py [ckpt=ckpt/num.pt] [n_episodes=3000] [pool=end|mean]
 """
 import sys, time
 import numpy as np, torch
@@ -15,6 +16,8 @@ PROBE_SEED = 20_000_000
 TARGETS = ["x", "v", "a", "F", "log_m", "mu"]
 MAX_SPANS = 24  # observables history slots
 STATED_DIGITS = {"num": 2, "nat": 1}  # decimals each channel states x and v with (qual needs a binned baseline, not built)
+CEIL_SEED = 30_000_000
+CEIL_EPISODES = (5_000, 50_000)  # two sizes, to see whether the ceiling has saturated
 
 
 def ridge():
@@ -23,6 +26,40 @@ def ridge():
 
 def mlp():
     return MLPRegressor(hidden_layer_sizes=(256,), early_stopping=True, max_iter=300, random_state=0)
+
+
+def ceiling(channel, X_test, y_mean, y_sd, n_eps):
+    """Stronger reference: a 2-layer GPU MLP on observables from n_eps fresh episodes, with early stopping.
+    Still a lower bound on what the stated values allow, so check that it saturates as n_eps grows.
+    -> test predictions, standardized with the probe split's target stats (y_mean, y_sd)."""
+    eps = [sim.make_episode(s) for s in range(CEIL_SEED, CEIL_SEED + n_eps)]
+    X, y = observables(eps, channel), (targets(eps, channel)[0] - y_mean) / y_sd
+    x_mean, x_sd = X.mean(0), X.std(0) + 1e-6
+    to = lambda a: torch.tensor(a, dtype=torch.float32).cuda()
+    X, y, Xt = to((X - x_mean) / x_sd), to(y), to((X_test - x_mean) / x_sd)
+    n_val = len(X) // 20
+    torch.manual_seed(0)
+    perm = torch.randperm(len(X), device="cuda")
+    tr, va = perm[n_val:], perm[:n_val]  # ponytail: split by row, not episode; fine for early stopping only
+    net = torch.nn.Sequential(torch.nn.Linear(X.shape[1], 512), torch.nn.GELU(), torch.nn.Linear(512, 512),
+                              torch.nn.GELU(), torch.nn.Linear(512, y.shape[1])).cuda()
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
+    best, best_state, bad = float("inf"), None, 0
+    for epoch in range(200):
+        for idx in tr[torch.randperm(len(tr), device="cuda")].split(1024):
+            loss = torch.nn.functional.mse_loss(net(X[idx]), y[idx])
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+        with torch.no_grad():
+            val = torch.nn.functional.mse_loss(net(X[va]), y[va]).item()
+        if val < best - 1e-4:
+            best, best_state, bad = val, {k: v.clone() for k, v in net.state_dict().items()}, 0
+        elif (bad := bad + 1) >= 10:
+            break
+    net.load_state_dict(best_state)
+    with torch.no_grad():
+        return net(Xt).cpu().numpy()
 
 
 def targets(eps, channel):
@@ -50,16 +87,24 @@ def observables(eps, channel):
 
 
 @torch.no_grad()
-def residuals(model, eps, stoi, channel):
-    """-> feats[layer] (n_spans, d), in the same span order as targets()"""
+def residuals(model, eps, stoi, channel, pool="end"):
+    """-> feats[layer] (n_spans, d), in the same span order as targets().
+    pool="end": the span's last token. pool="mean": mean over the span's tokens (s0+1 .. s1)."""
     feats = [[] for _ in range(model.cfg["layers"] + 1)]
     for i in range(0, len(eps), 64):
         chunk = eps[i:i + 64]
         _, resid = model(encode([e["texts"][channel]["text"] for e in chunk], stoi, model.cfg["block"]).cuda(), True)
         b_idx = [b for b, e in enumerate(chunk) for _ in e["texts"][channel]["spans"]]
-        pos = [s1 for e in chunk for _, s1, _ in e["texts"][channel]["spans"]]  # token s1 = last char of span
+        s0 = torch.tensor([s for e in chunk for s, _, _ in e["texts"][channel]["spans"]])
+        s1 = torch.tensor([s for e in chunk for _, s, _ in e["texts"][channel]["spans"]])  # token s1 = last char of span
         for L, h in enumerate(resid):
-            feats[L].append(h[b_idx, pos].float().cpu().numpy())
+            h = h.float()
+            if pool == "mean":
+                c = h.cumsum(1)
+                f = (c[b_idx, s1] - c[b_idx, s0]) / (s1 - s0).cuda()[:, None]  # sum of tokens s0+1..s1
+            else:
+                f = h[b_idx, s1]
+            feats[L].append(f.cpu().numpy())
     return [np.concatenate(f) for f in feats]
 
 
@@ -83,10 +128,12 @@ def table(name, r2):
 
 
 def main():
-    path, n = (sys.argv[1:] + [None] * 2)[:2]
-    path, n = path or "ckpt/num.pt", int(n or 3000)
+    path, n, pool = (sys.argv[1:] + [None] * 3)[:3]
+    path, n, pool = path or "ckpt/num.pt", int(n or 3000), pool or "end"
+    assert pool in ("end", "mean")
     model, stoi, ck = load(path)
     channel = ck["channel"]
+    print(f"{path}: channel {channel}, {n} episodes, pool={pool}")
     torch.manual_seed(1)
     rand = GPT(**ck["cfg"]).cuda().eval()
 
@@ -97,9 +144,9 @@ def main():
 
     res = {}  # name -> (r2 per layer, preds per layer)
     t0 = time.time()
-    feats = residuals(model, eps, stoi, channel)
+    feats = residuals(model, eps, stoi, channel, pool)
     for name, f, make in [("trained ridge", feats, ridge), ("trained mlp", feats, mlp),
-                          ("random-init ridge", residuals(rand, eps, stoi, channel), ridge),
+                          ("random-init ridge", residuals(rand, eps, stoi, channel, pool), ridge),
                           ("observables ridge", [observables(eps, channel)], ridge),
                           ("observables mlp", [observables(eps, channel)], mlp)]:
         r2, preds, yt = fit_eval(f, y, train, test, make)
@@ -107,6 +154,12 @@ def main():
         if len(r2) > 1:
             table(f"{name}, channel {channel}", r2)
         print(f"  [{name} done, {time.time() - t0:.0f}s]", flush=True)
+
+    X_test = observables(eps, channel)[test]
+    for n_ceil in CEIL_EPISODES:
+        p = ceiling(channel, X_test, y[train].mean(0), y[train].std(0), n_ceil)
+        res[f"ceiling {n_ceil // 1000}k eps"] = (np.array([[r2_score(yt[:, j], p[:, j]) for j in range(len(TARGETS))]]), [p])
+        print(f"  [ceiling {n_ceil} episodes done, {time.time() - t0:.0f}s]", flush=True)
 
     print("\nbest layer per target")
     print(f"{'':18s}" + "".join(f"{t:>8}" for t in TARGETS))
@@ -117,7 +170,7 @@ def main():
     print("\nhidden params, spans with step >= 25, by identifiability of that param")
     late = mt[:, 1] >= 25
     for j, flag in ((TARGETS.index("log_m"), 2), (TARGETS.index("mu"), 3)):
-        for name in ("trained ridge", "trained mlp", "observables mlp"):
+        for name in ("trained ridge", "trained mlp", "observables mlp", f"ceiling {CEIL_EPISODES[-1] // 1000}k eps"):
             r2, preds = res[name]
             L = int(r2[:, j].argmax())
             cells = []

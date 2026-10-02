@@ -128,10 +128,53 @@ Reading:
   - (b) and (c) must be ruled out before claiming (a).
 - Random-init is about 0 everywhere, unlike `num` (about 0.5 for x and v). In `num`, a fixed format makes position a proxy for time; in `nat`, variable-length sentences break that.
 
+### Probe-position check: mean pooling over each span (2026-10-02, local)
+
+Same checkpoints, with features averaged over the span's tokens instead of read at its last token. Logs: `probe_nat_run1_mean.log`, `probe_num_run2_mean.log`.
+
+| trained ridge, log_m | end of span | mean over span |
+|---|---|---|
+| `num` (run 2) | 0.61 | 0.67 |
+| `nat` (run 3) | 0.39 | 0.48 |
+
+Reading:
+- **Probe position does not explain the `nat` vs `num` gap.** Pooling raises both channels by a similar amount, and the gap stays at about 0.2.
+- **The observables-MLP "ceiling" is not a ceiling.** With mean pooling, the `num` model beats it on log_m (0.67 vs 0.64) and on mu (0.34 vs 0.18). The sklearn MLP on about 26k rows is underfit. This corrects two earlier readings: "close to the nonlinear ceiling" (run 2) and "mu is limited by the data, not the model". A stronger reference is needed before any ceiling claim.
+- Mean pooling also lifts random-init (log_m 0.15 → 0.26 for `num`). Averaged random features act like a bag of characters, so the trained-vs-random comparison must use the same pooling.
+
+### Stronger ceiling (2026-10-02, RunPod)
+
+`probe.ceiling()`: a 2-layer GPU MLP (512 wide, early stopping) on the observables from fresh episodes (seeds 30M+), scored on the same test split. `probe.py` prints rows for 5k and 50k episodes. The 200k result is in `ceiling_scaling_200k.log`.
+
+| ceiling trained on | log_m | mu | a |
+|---|---|---|---|
+| 5k episodes | 0.71 | 0.28 | 0.92 |
+| 50k episodes | 0.77 | 0.57 | 0.94 |
+| 200k episodes | 0.80 | 0.67 | 0.95 |
+
+- `num` and `nat` give the same ceiling to 3 decimals, so rounding to 0.1 loses essentially nothing.
+- log_m is levelling off at about 0.8. mu is still rising, so its true ceiling is above 0.67.
+- With the 50k ceiling, mu decodes higher on identifiable than on non-identifiable episodes (0.72 vs 0.57). The earlier "reversed mu" pattern was an artifact of the weak sklearn MLP.
+
+### Run 4: `nat`, 45k steps on RunPod (2026-10-02)
+
+Fresh run, cosine schedule over 45k steps, 2349 s on an RTX 4090. Validation loss 0.0833 (15k run: 0.0869). Checkpoint `ckpt/nat_45k.pt`, logs `train_probe_nat_45k.log` (end pooling) and `probe_nat_45k_mean.log` (mean pooling).
+
+| trained ridge | log_m end | log_m mean | mu end | mu mean |
+|---|---|---|---|---|
+| `num` 15k (run 2) | 0.61 | 0.67 | 0.22 | 0.34 |
+| `nat` 15k (run 3) | 0.39 | 0.48 | 0.13 | 0.16 |
+| `nat` 45k (run 4) | 0.55 | 0.60 | 0.18 | 0.32 |
+| ceiling (200k episodes) | 0.80 | 0.80 | ≥0.67 | ≥0.67 |
+
+Reading:
+- **Most of the `nat` vs `num` gap was undertraining.** Tripling the steps closes about 70% of it (mean pooling: a gap of 0.19 shrinks to 0.07). Fair channel comparisons need every model trained to convergence, so `num` also needs a 45k run.
+- **Both channels sit well below the ceiling,** for mass (about 0.6 vs 0.8) and especially for mu (about 0.3 vs at least 0.67). The information is in the text, but the model doesn't extract all of it. This gap is a headline quantity for the project.
+- Stated variables still decode worse in `nat` at the end token (x 0.40 vs 0.79 for `num`). With mean pooling they recover (x 0.61, v 0.60).
+
 ## Known issues and open questions
 
-- mu has a low decodability ceiling, even from stated values with an MLP (0.18). Possible causes: mu's small effect on the dynamics (mu·g ≤ 2.94 m/s²), the confound with m, or MLP baseline capacity and data size. Worth checking with a closed-form estimator from the trajectory as a true ceiling.
-- Why non-identifiable episodes show higher mu R² than identifiable ones is unexplained (seen in the ceiling too).
+- The observables MLP (sklearn) is underfit. Use the `ceiling` rows instead. The mu ceiling has not saturated even at 200k episodes.
 - `qual` still needs a binned observables baseline in `probe.py` (`STATED_DIGITS` covers only `num` and `nat`). The block-size overflow is fixed.
 
 - `qual` repeats "It stays still." during long stuck stretches. This inflates token counts (the length confound). It could be collapsed into one sentence.

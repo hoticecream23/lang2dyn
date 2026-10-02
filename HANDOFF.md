@@ -9,8 +9,9 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 - The phase-1 simulator plus the `num`, `qual` and `nat` verbalizers work. `python sim.py` passes all checks.
 - Identifiability is flagged separately for m and mu.
 - **Run 2 (`num`, 15k steps, RunPod RTX 4090) passed the decision gate for mass.** A linear probe on the trained model decodes log_m at R² 0.61, while a linear probe on the stated numbers gets 0.02 and the nonlinear ceiling is 0.64. Acceleration and mu are not evidence of computation (see `PROJECT_STATE.md`, "Results").
-- **Run 3 (`nat`):** mass is still computed (linear 0.39 vs 0.02 baseline), but less is extracted than with `num` (0.61), despite the same information ceiling (0.63). Confounds are not yet ruled out.
-- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt`, `ckpt/nat_run1.pt` (gitignored).
+- **Runs 3–4 (`nat`):** mass is computed from language too. At 45k steps it nearly matches `num` at 15k (mean pooling: log_m 0.60 vs 0.67). Probe position was ruled out as the cause of the gap; undertraining explains most of it.
+- **Stronger ceiling** (`probe.ceiling`, GPU MLP): log_m about 0.80, mu at least 0.67. Both channels sit well below it, mu most of all.
+- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt`, `ckpt/nat_run1.pt`, `ckpt/nat_45k.pt` (gitignored).
 
 ## Compute: RunPod
 
@@ -24,9 +25,8 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 ## Next steps, in order
 
-1. **Rule out confounds in the `nat` vs `num` gap** (run 3: log_m linear 0.39 vs 0.61, with the same 0.63 ceiling):
-   - Probe position: also probe at the token right after each number, or average over the span's tokens.
-   - Compute: train `nat` longer (for example 45k steps), and check whether the gap closes.
+1. **Train `num` for 45k steps too** (RunPod, about 15 min), so both channels are compared at convergence. Probe with `end` and `mean` pooling. Run 4 showed most of the `nat` gap was undertraining.
+   - Consider checking convergence directly: is `nat` still improving at 45k? Validation loss went 0.0869 → 0.0833.
 2. Add the `rel` and `sym` verbalizers, plus a binned observables baseline so `qual` can be probed.
 3. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
 4. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
