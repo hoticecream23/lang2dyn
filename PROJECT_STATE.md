@@ -14,7 +14,7 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 |---|---|---|
 | `project_idea.md` | Original idea and novelty analysis (LLM-generated citations, unverified) | reference |
 | `Simulator_Verbalizer_Spec.md` | Spec v0: simulator, channels, information map, splits, episode record | current |
-| `sim.py` | Phase-1 simulator, `num` + `qual` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
+| `sim.py` | Phase-1 simulator, `num` + `qual` + `nat` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
 | `train.py` | Char-level GPT (6 layers, d=256, 4.9M params), one episode per sequence, writes `ckpt/<channel>.pt` | working |
 | `probe.py` | Ridge and MLP probes on the residual stream at span-end tokens. Baselines: random-init model, and observables (ridge and MLP on the ground-truth stated values, most recent span first). Hidden params split by per-param identifiability | working |
 | `PROJECT_STATE.md` | This file | |
@@ -29,6 +29,7 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 5. **The headline probes target inferable-but-unstated variables** (the I cells in the information map). Probes on stated variables measure token copying and serve as baselines.
 6. **Phase 1 is one cart with piecewise force, kinetic friction and stiction.** Collisions are phase 2.
 7. **mu was narrowed from 0–0.5 to 0–0.3.** With 0–0.5, static friction (up to 24.5 N) swallowed many force segments: 33% of steps stuck, 71% of episodes identifiable. With 0–0.3: 19% stuck, 84% identifiable (2000 seeds). About 10% of episodes are deliberate single-segment controls, so the ceiling is roughly 90%.
+8. **One char-level tokenizer for every channel, no BPE.** A shared tokenizer removes the tokenizer as a confound between channels. `train.py` sets the context length from the data (1.25 × the longest training text, rounded up to 64): about 576 tokens for `num`, about 1472 for `nat`.
 
 ## sim.py facts
 
@@ -101,11 +102,37 @@ Reading:
 - **The identifiability gaps are a data property.** The log_m id > non-id gap and the reversed mu gap both appear in the observables ceiling too, so they come from the data, not from the model. Non-identifiable episodes still carry partial information (stiction bounds, the parameter range). The non-id subset is small (about 70 episodes).
 - **Decision gate passed for mass:** the trained model clearly beats the linear observables baseline. Move on to more channels.
 
+### Run 3: `nat` channel, 15k steps on RunPod (2026-10-02)
+
+Setup: same as run 2 (100k episodes, 15k steps, batch 64, RTX 4090) on `nat` text, context length 1472. Training took 783 s. Final validation loss 0.0869 per character, which is not comparable to `num`, because most `nat` characters are predictable template words. Checkpoint `ckpt/nat_run1.pt`, log `train_probe_nat_run1.log` (both gitignored). The observables baselines use `nat`'s precision (x and v to 0.1).
+
+Best layer per target, with run 2 (`num`) in brackets:
+
+| | x | v | a | F | log_m | mu |
+|---|---|---|---|---|---|---|
+| trained ridge | 0.37 (0.79) | 0.43 (0.68) | 0.15 (0.65) | 0.37 (0.87) | **0.39 (0.61)** | 0.13 (0.22) |
+| trained MLP | 0.79 (0.92) | 0.84 (0.90) | 0.47 (0.85) | 0.60 (0.96) | 0.47 (0.62) | 0.09 (0.20) |
+| random-init ridge | 0.00 | 0.01 | 0.01 | 0.03 | 0.00 | 0.00 |
+| observables ridge | 1.00 | 1.00 | 0.75 | 1.00 | 0.02 | 0.03 |
+| observables MLP (ceiling) | 1.00 | 1.00 | 0.88 | 1.00 | 0.63 (0.64) | 0.18 |
+
+Late spans, log_m: trained ridge 0.43 on identifiable vs 0.24 on non-identifiable episodes (ceiling 0.74 vs 0.52).
+
+Reading:
+- **First cross-channel result: the information is still there, but the model extracts less of it.** The `nat` ceiling for log_m (0.63) matches `num` (0.64), so rounding to 0.1 removed almost no mass information. Yet the trained model's linear log_m drops from 0.61 to 0.39. This gap between information present and information extracted is exactly what the project measures.
+- Mass is still computed: a linear probe gets 0.39 on the trained model vs 0.02 on the stated values.
+- Every variable decodes worse at the span-end token, including stated ones (x 0.37). Possible causes:
+  - (a) Language makes extraction harder.
+  - (b) The probe position: x and v sit at varying positions inside templated sentences, while in `num` they sit at fixed offsets.
+  - (c) The compute budget: same steps and model size, but the model must also learn the templates, and loss was still falling slowly.
+  - (b) and (c) must be ruled out before claiming (a).
+- Random-init is about 0 everywhere, unlike `num` (about 0.5 for x and v). In `num`, a fixed format makes position a proxy for time; in `nat`, variable-length sentences break that.
+
 ## Known issues and open questions
 
 - mu has a low decodability ceiling, even from stated values with an MLP (0.18). Possible causes: mu's small effect on the dynamics (mu·g ≤ 2.94 m/s²), the confound with m, or MLP baseline capacity and data size. Worth checking with a closed-form estimator from the trajectory as a true ceiling.
 - Why non-identifiable episodes show higher mu R² than identifiable ones is unexplained (seen in the ceiling too).
-- `qual` texts exceed the 512-token block in `train.py` (assertion in `encode`). Raise the block size or shorten `qual` (for example, collapse repeated "It stays still.") before training on it.
+- `qual` still needs a binned observables baseline in `probe.py` (`STATED_DIGITS` covers only `num` and `nat`). The block-size overflow is fixed.
 
 - `qual` repeats "It stays still." during long stuck stretches. This inflates token counts (the length confound). It could be collapsed into one sentence.
 - `qual` reports "a gentle push starts" when the force changes within the same bin. This is intended information loss, but worth noting in the paper.
@@ -114,7 +141,7 @@ Reading:
 
 ## Not built yet
 
-- Verbalizers: `nat`, `rel`, `sym`, and the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
+- Verbalizers: `rel`, `sym`, and the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
 - Dataset splits: `iid`, `ood-combo`, `ood-extrap`, `compose`, `cross-channel`. The `ood-combo` and `ood-extrap` splits need param-region filtering in `sample_params` or at dataset-build time.
-- BPE tokenizer (needed once `nat` exists; `num` uses char-level) and the interchange intervention code.
+- The interchange intervention code.
 - Phase 2: collisions.

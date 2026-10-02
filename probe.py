@@ -14,6 +14,7 @@ from train import GPT, encode, load
 PROBE_SEED = 20_000_000
 TARGETS = ["x", "v", "a", "F", "log_m", "mu"]
 MAX_SPANS = 24  # observables history slots
+STATED_DIGITS = {"num": 2, "nat": 1}  # decimals each channel states x and v with (qual needs a binned baseline, not built)
 
 
 def ridge():
@@ -36,13 +37,13 @@ def targets(eps, channel):
 
 
 def observables(eps, channel):
-    """Stated values (t, x, v, F) of every span so far, as rounded in num text, most recent first, zero-padded to MAX_SPANS slots.
-    This is everything the num channel gives the model, minus the formatting."""
-    rows = []
+    """Stated values (t, x, v, F) of every span so far, at the precision the channel states them, most recent first, zero-padded to MAX_SPANS slots.
+    This is everything the channel gives the model, minus the formatting."""
+    rows, d = [], STATED_DIGITS[channel]
     for e in eps:
         tr, hist = e["traj"], []
         for _, _, r in e["texts"][channel]["spans"]:
-            hist.append([1.0, tr["t"][r], round(tr["x"][r], 2), round(tr["v"][r], 2), tr["F"][r]])
+            hist.append([1.0, tr["t"][r], round(tr["x"][r], d), round(tr["v"][r], d), tr["F"][r]])
             assert len(hist) <= MAX_SPANS
             rows.append(np.concatenate([np.ravel(hist[::-1]), np.zeros(5 * (MAX_SPANS - len(hist)))]))
     return np.array(rows)

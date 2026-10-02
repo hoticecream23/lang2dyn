@@ -88,8 +88,8 @@ S = stated, I = inferable from the dynamics, B = binned, A = absent/not identifi
 
 | Var | num | nat | qual | rel | nat-notime |
 |---|---|---|---|---|---|
-| x | S | S | A | A | S |
-| v | S | S (rounded) | B | relative only | S |
+| x | S | S (0.1 m) | A | A | S |
+| v | S | S (0.1 m/s) | B | relative only | S |
 | a | I | I | B (change word) | relative only | A (no dt) |
 | F | S | S | B | relative only | S |
 | m | I | I | B | A | A |

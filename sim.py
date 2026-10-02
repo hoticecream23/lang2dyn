@@ -178,6 +178,72 @@ def parse_qual(sentence):
     return z
 
 
+# ---- nat ----
+# Ordinary language with rounded numbers: states t (as gaps), x and v (0.1 precision), F (exact). Never states a, m, mu.
+
+def num1(u):
+    return f"{round(u, 1) + 0.0:.1f}"  # + 0.0 turns -0.0 into 0.0
+
+
+def at_mark(x):
+    return f"at the {num1(x)} m mark"
+
+
+def motion(v):
+    return f"moving {side(v)} at {num1(abs(v))} m/s"
+
+
+def nat_force(F, first, rng):
+    if F == 0:
+        return "Nothing is pushing it." if first else rng.choice(["The push is removed.", "The push stops."])
+    f, d = num1(abs(F)), side(F)
+    if first:
+        return rng.choice([f"A {f} N push to the {d} is applied.", f"A {f} N push to the {d} begins."])
+    return rng.choice([f"The push changes to {f} N toward the {d}.", f"Now a {f} N push to the {d} acts on it."])
+
+
+def nat_state(tr, r, rng):
+    x, v, ev = tr["x"][r], tr["v"][r], tr["events"][r]
+    if "stop" in ev:
+        return f"It comes to rest {at_mark(x)}."
+    if "start" in ev:
+        return f"It starts moving {side(tr['a'][r])} from the {num1(x)} m mark."
+    if tr["regime"][r] == "stuck" or v == 0:
+        return rng.choice([f"It is at rest {at_mark(x)}.", f"It stays put {at_mark(x)}."])
+    return rng.choice([f"It is {at_mark(x)}, {motion(v)}.", f"It is now {motion(v)}, {at_mark(x)}."])
+
+
+def verbalize_nat(tr, rng):
+    out, prev = [], 0
+    for r in emit_steps(tr):
+        if r == 0:
+            c = [nat_state(tr, 0, rng).replace("It", "A cart", 1), nat_force(tr["F"][0], True, rng)]
+        else:
+            c = ([nat_force(tr["F"][r], False, rng)] if "force_change" in tr["events"][r] else []) + [nat_state(tr, r, rng)]
+            dt = num1(tr["t"][r] - tr["t"][prev])
+            c[0] = rng.choice([f"{dt} s later,", f"{dt} seconds later,", f"After {dt} more seconds,"]) + " " + c[0][0].lower() + c[0][1:]
+        out.append((" ".join(c), r))
+        prev = r
+    return join(out)
+
+
+def parse_nat(sentence):
+    """Sentence -> {"dt"?, "x", "v", "F"?}. Time comes as the gap since the previous sentence."""
+    z = {}
+    if mo := re.match(r"(\d+\.\d) s(?:econds)? later,|After (\d+\.\d) more seconds,", sentence):
+        z["dt"] = float(mo[1] or mo[2])
+    if mo := re.search(r"(\d+\.\d) N (?:push )?(?:to|toward) the (left|right)", sentence):
+        z["F"] = float(mo[1]) * (1 if mo[2] == "right" else -1)
+    elif re.search(r"Nothing is pushing|push is removed|push stops", sentence):
+        z["F"] = 0.0
+    z["x"] = float(re.search(r"(-?\d+\.\d) m mark", sentence)[1])
+    if mo := re.search(r"moving (left|right) at (\d+\.\d) m/s", sentence):
+        z["v"] = float(mo[2]) * (1 if mo[1] == "right" else -1)
+    elif re.search(r"at rest|to rest|stays put|starts moving", sentence):
+        z["v"] = 0.0
+    return z
+
+
 def make_episode(seed, **changes):
     """changes (e.g. m=3.0) make a counterfactual twin: same sampled params, one value overridden."""
     p = {**sample_params(random.Random(seed)), **changes}
@@ -188,7 +254,8 @@ def make_episode(seed, **changes):
         "params": p,
         "traj": tr,
         "identifiable": identifiable(tr),
-        "texts": {"num": verbalize_num(tr), "qual": verbalize_qual(tr, p["m"], random.Random(f"{seed}-surface"))},
+        "texts": {"num": verbalize_num(tr), "qual": verbalize_qual(tr, p["m"], random.Random(f"{seed}-surface")),
+                  "nat": verbalize_nat(tr, random.Random(f"{seed}-surface-nat"))},
         "cf_of": base if changes else None,
         "cf_change": changes or None,
     }
@@ -244,6 +311,17 @@ def _checks():
             if "speed" in z:
                 assert z["speed"] == speed_bin(tr["v"][r]), (seed, r, qual["text"][s0:s1])
         assert "speed" in parse_qual(qual["text"][slice(*qual["spans"][0][:2])])
+        nat, t = e["texts"]["nat"], 0.0
+        for s0, s1, r in nat["spans"]:
+            z = parse_nat(nat["text"][s0:s1])
+            assert ("dt" in z) == (r > 0)
+            t = round(t + z.get("dt", 0.0), 1)  # time is only given as gaps; rebuild it
+            assert t == tr["t"][r]
+            assert abs(z["x"] - tr["x"][r]) <= 0.05 + 1e-9 and abs(z["v"] - tr["v"][r]) <= 0.05 + 1e-9
+            if r == 0 or "force_change" in tr["events"][r]:
+                assert z["F"] == tr["F"][r]
+            else:
+                assert "F" not in z
 
     # counterfactual twin differs only in the overridden param
     a, b = make_episode(7), make_episode(7, m=4.0)

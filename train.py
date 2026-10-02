@@ -82,7 +82,9 @@ def main():
     train_t, val_t = texts(range(n)), texts(range(VAL_SEED, VAL_SEED + 2000))
     chars = sorted(set("".join(train_t)))
     stoi = {c: i + 3 for i, c in enumerate(chars)}
-    model = GPT(len(chars) + 3).cuda()
+    # context length from the data, with headroom for longer held-out episodes (num ~576, nat/qual ~1536)
+    block = 64 * math.ceil(1.25 * (max(map(len, train_t)) + 2) / 64)
+    model = GPT(len(chars) + 3, block=block).cuda()
     X, V = encode(train_t, stoi, model.cfg["block"]), encode(val_t, stoi, model.cfg["block"]).cuda()
     print(f"{channel}: {n} episodes, vocab {len(chars) + 3}, {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params, "
           f"data {time.time() - t0:.0f}s", flush=True)
