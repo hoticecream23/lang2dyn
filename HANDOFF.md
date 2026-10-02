@@ -30,7 +30,7 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 1. **Train `qual` at 45k** (its observables baseline is built; probe with `CEIL=5000,50000`). With that, all five channels have one 45k run each.
 2. Run 2–3 seeds per channel (`num`, `nat`) to firm up the mu comparison: `python train.py nat 100000 45000 1` writes `ckpt/nat_s1.pt`. The seed changes weight init and batch order only; the data stays the same.
 3. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
-4. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
+4. **Generalization runs** (splits are built; see `PROJECT_STATE.md`, "Dataset splits"). First, free: probe existing iid models on `ood-extrap` (`python probe.py ckpt/num_45k.pt 3000 mean ood-extrap`). Then train `num` on `ood-combo` and `compose` and probe on the same split.
 5. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
 
 ## Prompt to paste into a new chat

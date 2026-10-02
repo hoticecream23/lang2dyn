@@ -2,7 +2,9 @@
 random-init model (same probe), and "observables" (probes fed the ground-truth stated values directly).
 "ceiling" rows: a GPU MLP on observables from many fresh episodes, the best decoder we have from the stated values.
 
-python probe.py [ckpt=ckpt/num.pt] [n_episodes=3000] [pool=end|mean]
+python probe.py [ckpt=ckpt/num.pt] [n_episodes=3000] [pool=end|mean] [split=iid]
+split iid: probes fit on 75% of n episodes, scored on 25%. Other splits: fit on n episodes of the split's train part,
+scored on n/3 episodes of its test part, so the scores measure whether representations generalize out of distribution.
 """
 import functools, os, sys, time
 import numpy as np, torch
@@ -10,7 +12,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import r2_score
 import sim
-from train import GPT, encode, load
+from train import GPT, encode, lm_loss, load
 
 PROBE_SEED = 20_000_000
 TARGETS = ["x", "v", "a", "F", "log_m", "mu"]
@@ -23,6 +25,17 @@ CEIL_SEED = 30_000_000
 CEIL_EPISODES = tuple(int(k) for k in os.environ.get("CEIL", "5000,50000").split(",") if k)
 
 
+SCORE_VS_TRAIN = False  # set in main for OOD splits
+
+
+def score(y_true, y_pred):
+    """R^2 for iid. For OOD splits, 1 - MSE / Var_train: targets are standardized with the train part's stats, so this is
+    1 - MSE. Plain R^2 on a narrow test region (e.g. m in [3, 5]) divides by that region's small variance and explodes."""
+    if SCORE_VS_TRAIN:
+        return 1 - float(np.mean((np.asarray(y_true) - np.asarray(y_pred)) ** 2))
+    return r2_score(y_true, y_pred)
+
+
 def ridge():
     return RidgeCV(alphas=np.logspace(-1, 4, 6), alpha_per_target=True)
 
@@ -31,11 +44,11 @@ def mlp():
     return MLPRegressor(hidden_layer_sizes=(256,), early_stopping=True, max_iter=300, random_state=0)
 
 
-def ceiling(channel, X_test, y_mean, y_sd, n_eps):
+def ceiling(channel, X_test, y_mean, y_sd, n_eps, split="iid"):
     """Stronger reference: a 2-layer GPU MLP on observables from n_eps fresh episodes, with early stopping.
     Still a lower bound on what the stated values allow, so check that it saturates as n_eps grows.
     -> test predictions, standardized with the probe split's target stats (y_mean, y_sd)."""
-    eps = [sim.make_episode(s) for s in range(CEIL_SEED, CEIL_SEED + n_eps)]
+    eps = sim.split_episodes(split, "train", n_eps, CEIL_SEED)  # trained on the train part only, like the probes
     X, y = observables(eps, channel), (targets(eps, channel)[0] - y_mean) / y_sd
     x_mean, x_sd = X.mean(0), X.std(0) + 1e-6
     to = lambda a: torch.tensor(a, dtype=torch.float32).cuda()
@@ -150,6 +163,15 @@ def residuals(model, eps, stoi, channel, pool="end"):
     return [np.concatenate(f) for f in feats]
 
 
+@torch.no_grad()
+def lm_loss_on(model, eps, stoi, channel):
+    """Mean next-token loss per sequence batch: does the model still predict the text well on these episodes?"""
+    X = encode([e["texts"][channel]["text"] for e in eps], stoi, model.cfg["block"]).cuda()
+    with torch.autocast("cuda", torch.bfloat16):
+        losses = [lm_loss(model, X[i:i + 100]).item() for i in range(0, len(X), 100)]
+    return sum(losses) / len(losses)
+
+
 def fit_eval(feats, y, train, test, make):
     """-> R^2 (n_feature_sets, n_targets), test predictions per feature set. Targets standardized (R^2 unchanged)."""
     ys = (y - y[train].mean(0)) / y[train].std(0)
@@ -157,31 +179,38 @@ def fit_eval(feats, y, train, test, make):
     for X in feats:
         Xs = (X - X[train].mean(0)) / (X[train].std(0) + 1e-6)
         p = make().fit(Xs[train], ys[train]).predict(Xs[test])
-        r2.append([r2_score(ys[test][:, j], p[:, j]) for j in range(len(TARGETS))])
+        r2.append([score(ys[test][:, j], p[:, j]) for j in range(len(TARGETS))])
         preds.append(p)
     return np.array(r2), preds, ys[test]
 
 
 def table(name, r2):
-    print(f"\n{name}  (R^2 on held-out episodes)")
+    print(f"\n{name}  ({'1 - MSE/Var_train on the test part' if SCORE_VS_TRAIN else 'R^2 on held-out episodes'})")
     print("layer " + "".join(f"{t:>8}" for t in TARGETS))
     for L, row in enumerate(r2):
         print(f"{L:5d} " + "".join(f"{v:8.3f}" for v in row))
 
 
 def main():
-    path, n, pool = (sys.argv[1:] + [None] * 3)[:3]
-    path, n, pool = path or "ckpt/num.pt", int(n or 3000), pool or "end"
-    assert pool in ("end", "mean")
+    path, n, pool, split = (sys.argv[1:] + [None] * 4)[:4]
+    path, n, pool, split = path or "ckpt/num.pt", int(n or 3000), pool or "end", split or "iid"
+    assert pool in ("end", "mean") and split in sim.SPLITS
+    global SCORE_VS_TRAIN
+    SCORE_VS_TRAIN = split != "iid"
     model, stoi, ck = load(path)
     channel = ck["channel"]
-    print(f"{path}: channel {channel}, {n} episodes, pool={pool}")
+    print(f"{path}: channel {channel}, {n} episodes, pool={pool}, split={split} (model trained on split={ck.get('split', 'iid')})")
     torch.manual_seed(1)
     rand = GPT(**ck["cfg"]).cuda().eval()
 
-    eps = [sim.make_episode(s) for s in range(PROBE_SEED, PROBE_SEED + n)]
+    if split == "iid":
+        eps, n_fit = sim.split_episodes("iid", "train", n, PROBE_SEED), int(0.75 * n)
+    else:
+        eps, n_fit = sim.split_episodes(split, "train", n, PROBE_SEED) + sim.split_episodes(split, "test", n // 3, PROBE_SEED), n
+        for name, part in (("train part", eps[:n]), ("test part", eps[n:])):
+            print(f"  LM loss on {name}: {lm_loss_on(model, part, stoi, channel):.4f}")
     y, meta = targets(eps, channel)
-    train, test = meta[:, 0] < 0.75 * n, meta[:, 0] >= 0.75 * n  # split by episode, not by span
+    train, test = meta[:, 0] < n_fit, meta[:, 0] >= n_fit  # split by episode, not by span
     mt = meta[test]
 
     res = {}  # name -> (r2 per layer, preds per layer)
@@ -201,8 +230,8 @@ def main():
 
     X_test = observables(eps, channel)[test] if has_obs else None
     for n_ceil in CEIL_EPISODES if has_obs else ():
-        p = ceiling(channel, X_test, y[train].mean(0), y[train].std(0), n_ceil)
-        res[f"ceiling {n_ceil // 1000}k eps"] = (np.array([[r2_score(yt[:, j], p[:, j]) for j in range(len(TARGETS))]]), [p])
+        p = ceiling(channel, X_test, y[train].mean(0), y[train].std(0), n_ceil, split)
+        res[f"ceiling {n_ceil // 1000}k eps"] = (np.array([[score(yt[:, j], p[:, j]) for j in range(len(TARGETS))]]), [p])
         print(f"  [ceiling {n_ceil} episodes done, {time.time() - t0:.0f}s]", flush=True)
 
     print("\nbest layer per target")
@@ -222,7 +251,7 @@ def main():
             cells = []
             for ok in (1, 0):
                 mask = late & (mt[:, flag] == ok)
-                cells.append(f"{'id' if ok else 'non-id'} n={mask.sum():5d} R^2 {r2_score(yt[mask, j], preds[L][mask, j]):6.3f}")
+                cells.append(f"{'id' if ok else 'non-id'} n={mask.sum():5d} R^2 {score(yt[mask, j], preds[L][mask, j]):6.3f}")
             print(f"  {TARGETS[j]:6s} {name:18s} L{L}  " + "   ".join(cells))
 
 

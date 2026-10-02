@@ -385,6 +385,49 @@ def make_episode(seed, **changes):
     }
 
 
+# ---- dataset splits ----
+# Every split has a "train" part (what the language model and probes are fit on) and a "test" part.
+#   iid         both parts from the default distribution
+#   ood-combo   test = m in [3, 5] with some |F| >= 7; train = everything else (an unseen combination of seen values)
+#   ood-extrap  train = default (m in 0.5-5); test = m in (5, 8] (masses never seen)
+#   compose     train = frictionless episodes (mu = 0) or force-free coasting (F = 0); test = friction and force together
+
+SPLITS = ("iid", "ood-combo", "ood-extrap", "compose")
+
+
+def in_combo(p):
+    return 3 <= p["m"] <= 5 and max(abs(f) for _, f in p["F_segments"]) >= 7
+
+
+def split_overrides(split, part, seed):
+    """Param overrides that put this seed's episode into (split, part), or None if this seed belongs to the other part."""
+    p = sample_params(random.Random(seed))
+    test = part == "test"
+    if split == "iid":
+        return {}
+    if split == "ood-combo":
+        return {} if in_combo(p) == test else None
+    if split == "ood-extrap":
+        return {"m": round(random.Random(f"{seed}-extrap").uniform(5, 8), 3)} if test else {}
+    if split == "compose":
+        if test:
+            return {} if p["mu"] > 0 and any(f for _, f in p["F_segments"]) else None
+        return {"mu": 0.0} if random.Random(f"{seed}-compose").random() < 0.5 else {"F_segments": [[0.0, 0.0]]}
+    raise ValueError(split)
+
+
+def split_episodes(split, part, n, start_seed):
+    """n episodes of (split, part), taking seeds start_seed, start_seed + 1, ... and skipping seeds in the other part."""
+    out, seed = [], start_seed
+    while len(out) < n:
+        if (ov := split_overrides(split, part, seed)) is not None:
+            e = make_episode(seed, **ov)
+            e.update(id=f"{split}_{part}_{seed:08d}", cf_of=None, cf_change=None, split=(split, part))  # overrides here are not counterfactuals
+            out.append(e)
+        seed += 1
+    return out
+
+
 def _checks():
     ep = lambda **p: simulate({"x0": 0.0, "v0": 0.0, "mu": 0.0, "m": 1.0, "F_segments": [[0.0, 0.0]], **p})
 
@@ -470,6 +513,20 @@ def _checks():
         assert sym["spans"] == num["spans"] and not set(sym["text"]) & set("0123456789. ")
         for s0, s1, r in sym["spans"]:
             assert parse_sym(sym["text"][s0:s1]) == parse_num(num["text"][s0:s1])
+
+    # splits: parts are disjoint and land in the intended regions
+    for split in SPLITS:
+        tr_eps, te_eps = split_episodes(split, "train", 200, 0), split_episodes(split, "test", 200, 0)
+        tr_p, te_p = [e["params"] for e in tr_eps], [e["params"] for e in te_eps]
+        if split == "ood-combo":
+            assert not any(map(in_combo, tr_p)) and all(map(in_combo, te_p))
+        if split == "ood-extrap":
+            assert all(0.5 <= p["m"] <= 5 for p in tr_p) and all(5 < p["m"] <= 8 for p in te_p)
+        if split == "compose":
+            assert all(p["mu"] == 0 or p["F_segments"] == [[0.0, 0.0]] for p in tr_p)
+            assert all(p["mu"] > 0 and any(f for _, f in p["F_segments"]) for p in te_p)
+            assert {p["mu"] == 0 for p in tr_p} == {True, False}  # both kinds of training episode occur
+    assert split_episodes("ood-combo", "train", 5, 0)[0]["id"].startswith("ood-combo_train_")
 
     # counterfactual twin differs only in the overridden param
     a, b = make_episode(7), make_episode(7, m=4.0)

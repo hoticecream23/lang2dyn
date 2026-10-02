@@ -1,6 +1,8 @@
 """Char-level GPT trained from scratch on one verbalizer channel. One episode per sequence.
 
-python train.py [channel=num] [n_episodes=100000] [steps=5000] [seed=0]   -> ckpt/<channel>.pt (seed 0) or ckpt/<channel>_s<seed>.pt
+python train.py [channel=num] [n_episodes=100000] [steps=5000] [seed=0] [split=iid]
+    -> ckpt/<channel>[_<split>][_s<seed>].pt   (split and seed suffixes only when not iid / 0)
+split (see sim.SPLITS): trains and validates on that split's train part only.
 seed sets weight init and batch order only; the training episodes are the same for every seed.
 Rerun the same command after an interruption to resume from the last 500-step save.
 """
@@ -75,20 +77,20 @@ def load(path, device="cuda"):
 
 
 def main():
-    channel, n, steps, seed = (sys.argv[1:] + [None] * 4)[:4]
-    channel, n, steps, seed = channel or "num", int(n or 100_000), int(steps or 5000), int(seed or 0)
+    channel, n, steps, seed, split = (sys.argv[1:] + [None] * 5)[:5]
+    channel, n, steps, seed, split = channel or "num", int(n or 100_000), int(steps or 5000), int(seed or 0), split or "iid"
     torch.manual_seed(seed)
-    name = channel if seed == 0 else f"{channel}_s{seed}"
-    texts = lambda seeds: [sim.make_episode(s)["texts"][channel]["text"] for s in seeds]
+    name = channel + (f"_{split}" if split != "iid" else "") + (f"_s{seed}" if seed else "")
+    texts = lambda count, start: [e["texts"][channel]["text"] for e in sim.split_episodes(split, "train", count, start)]
     t0 = time.time()
-    train_t, val_t = texts(range(n)), texts(range(VAL_SEED, VAL_SEED + 2000))
+    train_t, val_t = texts(n, 0), texts(2000, VAL_SEED)
     chars = sorted(set("".join(train_t)))
     stoi = {c: i + 3 for i, c in enumerate(chars)}
     # context length from the data, with headroom for longer held-out episodes (num ~576, nat/qual ~1536)
     block = 64 * math.ceil(1.25 * (max(map(len, train_t)) + 2) / 64)
     model = GPT(len(chars) + 3, block=block).cuda()
     X, V = encode(train_t, stoi, model.cfg["block"]), encode(val_t, stoi, model.cfg["block"]).cuda()
-    print(f"{channel}: {n} episodes, vocab {len(chars) + 3}, {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params, "
+    print(f"{name}: {n} episodes, vocab {len(chars) + 3}, {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params, "
           f"data {time.time() - t0:.0f}s", flush=True)
 
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1)
@@ -132,7 +134,7 @@ def main():
         opt.step()
         sched.step()
 
-    save({"model": model.state_dict(), "cfg": model.cfg, "chars": chars, "channel": channel, "seed": seed}, f"ckpt/{name}.pt")
+    save({"model": model.state_dict(), "cfg": model.cfg, "chars": chars, "channel": channel, "seed": seed, "split": split}, f"ckpt/{name}.pt")
     if os.path.exists(state_path):
         os.remove(state_path)
     print(f"saved ckpt/{name}.pt")

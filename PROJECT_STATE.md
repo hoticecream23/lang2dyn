@@ -225,6 +225,21 @@ Reading:
 - Observables for `qual` and `rel` (`probe.code_observables`): each sentence is read with the channel's own parser into one-hot "key=value" codes (qual 23 codes, rel 24). Each row holds the latest value of every key, plus the per-sentence history, most recent first. A ridge on 400 episodes gives `qual` log_m 0.88 (the mass bin is stated) and F 0.96. `CEIL=""` skips the ceiling for smoke tests; `CEIL=5000,50000,200000` sets the sizes.
 - The `qual` and `rel` parsers now also return the motion direction, change word and start/stop event (`qual`), and the push-vs-motion relation plus the first sentence (`rel`, via `parse_rel_first`). All are checked in `_checks()`.
 
+## Dataset splits (built 2026-10-02, not yet trained)
+
+`sim.SPLITS`, `sim.split_episodes(split, part, n, start_seed)`; `python train.py <ch> <n> <steps> <seed> <split>` trains on the train part only; `python probe.py <ckpt> <n> <pool> <split>` fits probes on the train part and scores them on the test part, and prints next-token loss on both parts.
+
+| split | train part | test part | seeds kept (train / test) | m identifiable in test |
+|---|---|---|---|---|
+| `iid` | default | default | 100% / 100% | 83% |
+| `ood-combo` | everything outside the test region | m in [3, 5] and some \|F\| ≥ 7 | 85% / 13% | 80% |
+| `ood-extrap` | default (m 0.5–5) | m in (5, 8] | 100% / 100% | **45%** (heavy carts stick more) |
+| `compose` | mu = 0, or F = 0 throughout (50/50) | mu > 0 and some F ≠ 0 | 100% / 100% | 83% (train part: 51%) |
+
+- Scores on OOD splits are **1 − MSE / Var_train** (targets standardized with the train part's stats), not R². Plain R² on a narrow test region such as m in [3, 5] divides by that region's small variance and goes to −30 even for decent predictions. 1 means perfect; 0 means an error as large as the training spread. Predicting the train mean scores below 0 on a shifted region.
+- `ood-extrap` needs no retraining: existing iid models already never saw m > 5. `ood-combo` and `compose` need models trained on their train part.
+- Not built: the `cross-channel` split. It needs mixed-channel training in `train.py`, and probes fit on one channel and scored on another.
+
 ## Known issues and open questions
 
 - Single seed per channel. Seed noise is about 0.02 on log_m and up to 0.07 on mu (run 6). Any mu comparison needs 2–3 seeds per channel.
@@ -240,6 +255,6 @@ Reading:
 ## Not built yet
 
 - Verbalizers: the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
-- Dataset splits: `iid`, `ood-combo`, `ood-extrap`, `compose`, `cross-channel`. The `ood-combo` and `ood-extrap` splits need param-region filtering in `sample_params` or at dataset-build time.
+- Dataset split `cross-channel` (the others are built).
 - The interchange intervention code.
 - Phase 2: collisions.
