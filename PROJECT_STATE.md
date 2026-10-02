@@ -225,6 +225,54 @@ Reading:
 - Observables for `qual` and `rel` (`probe.code_observables`): each sentence is read with the channel's own parser into one-hot "key=value" codes (qual 23 codes, rel 24). Each row holds the latest value of every key, plus the per-sentence history, most recent first. A ridge on 400 episodes gives `qual` log_m 0.88 (the mass bin is stated) and F 0.96. `CEIL=""` skips the ceiling for smoke tests; `CEIL=5000,50000,200000` sets the sizes.
 - The `qual` and `rel` parsers now also return the motion direction, change word and start/stop event (`qual`), and the push-vs-motion relation plus the first sentence (`rel`, via `parse_rel_first`). All are checked in `_checks()`.
 
+### Seeds: `num` and `nat`, 3 seeds each at 45k steps (2026-10-02, RunPod)
+
+Seeds 0, 1, 2 (weight init and batch order; same data). Checkpoints `ckpt/{num,nat}_45k.pt` (seed 0), `ckpt/{num,nat}_s{1,2}.pt`. Logs `{num,nat}_s{1,2}_{train,end,mean}.log`. Validation loss: `num` 0.2133 / 0.2032 / 0.2035, `nat` 0.0833 / 0.0836 / 0.0844.
+
+Trained ridge, best layer, mean ± sd over 3 seeds:
+
+| | log_m end | log_m mean | mu end | mu mean |
+|---|---|---|---|---|
+| `num` | 0.658 ± 0.019 | 0.707 ± 0.011 | 0.296 ± 0.015 | 0.385 ± 0.038 |
+| `nat` | 0.527 ± 0.023 | 0.613 ± 0.017 | 0.189 ± 0.007 | 0.298 ± 0.045 |
+| gap (t = gap / SE) | 0.131 (t 7.5) | 0.094 (t 8.3) | 0.107 (t 11.5) | 0.086 (t 2.6) |
+
+Reading:
+- **The `num` vs `nat` gap is real for both hidden parameters.** log_m loses about 0.09–0.13 and mu about 0.09–0.11 when the trajectory is told in words. Every gap is well beyond seed noise, except mean-pooled mu, which is weaker (t 2.6; mu is noisy under mean pooling, sd about 0.04).
+- Seed noise is about 0.01–0.02 for log_m and 0.01–0.05 for mu. This matches the `sym` estimate (run 6).
+- Supersedes the single-seed caveat in run 6 and in "Known issues".
+
+### Run 8: `qual`, 45k steps on RunPod (2026-10-02)
+
+2064 s, validation loss 0.0312. Checkpoint `ckpt/qual_45k.pt`, logs `qual45k_train.log`, `qual45k_end.log` (with ceiling), `qual45k_mean.log`. The observables are the parsed bin codes.
+
+| | log_m end | log_m mean | mu end | mu mean |
+|---|---|---|---|---|
+| trained ridge | 0.78 | 0.89 | 0.21 | 0.33 |
+| observables ridge | 0.89 | | 0.23 | |
+| ceiling 50k | 0.90 | | 0.44 | |
+
+- `qual` **states** a mass bin, so its mass ceiling (0.90) is higher than `num`'s (0.80). The model reaches about 0.98 of it, but that is mostly reading the stated bin, not computing mass.
+- mu (never stated): 0.33 vs a ceiling of 0.44, a ratio of about 0.75.
+
+### Generalization: `ood-extrap` with the existing iid models (2026-10-02)
+
+Probes fit on the train part (m ≤ 5) and scored on m in (5, 8]. Scores are 1 − MSE/Var_train. Logs: `num45k_extrap_mean.log`, `nat45k_extrap_mean.log`, `lm_extrap.log`.
+
+| log_m on m > 5 (mean pooling) | `num` 45k | `nat` 45k |
+|---|---|---|
+| trained ridge | −0.45 | −0.93 |
+| trained MLP | −0.33 | −0.43 |
+| observables ridge | −3.18 | −3.18 |
+| ceiling 50k (trained on m ≤ 5) | −0.28 | −0.28 |
+
+Next-token loss per token on **moving spans**, with heavy-mass relative to normal-mass in brackets: `num` 0.266 → 0.292 (1.10×), `nat` 0.090 → 0.101 (1.12×), `sym` 1.14×, `rel` 1.13×, `qual` 1.36×. Stuck spans are about 9× easier (`num`: 0.027 vs 0.243 iid), and heavy carts are stuck more. So loss over all tokens *falls* on heavy masses (`num` 0.220 → 0.165), which is an artifact.
+
+Reading:
+- **Probing hidden parameters beyond the training range is ill-posed.** Every decoder fit on m ≤ 5 fails on m > 5, including the ceiling. Extrapolation should be tested through model behavior (moving-span loss, interventions), not probes.
+- Still, a linear probe on the `num` representation extrapolates far better than a linear probe on the stated values (−0.45 vs −3.18). The mass direction is roughly linear somewhat beyond the training range. `nat` is weaker (−0.93).
+- Moving-span loss degrades 10–14% on unseen masses for `num`/`nat`/`sym`/`rel`, and 36% for `qual`, whose "heavy" bin covers everything above 2.5. This doesn't yet separate extrapolation failure from intrinsically harder dynamics: that needs a reference model trained on m up to 8.
+
 ## Dataset splits (built 2026-10-02, not yet trained)
 
 `sim.SPLITS`, `sim.split_episodes(split, part, n, start_seed)`; `python train.py <ch> <n> <steps> <seed> <split>` trains on the train part only; `python probe.py <ckpt> <n> <pool> <split>` fits probes on the train part and scores them on the test part, and prints next-token loss on both parts.
@@ -242,7 +290,7 @@ Reading:
 
 ## Known issues and open questions
 
-- Single seed per channel. Seed noise is about 0.02 on log_m and up to 0.07 on mu (run 6). Any mu comparison needs 2–3 seeds per channel.
+- Only `num` and `nat` have 3 seeds. `sym`, `rel` and `qual` have one seed each (seed noise: log_m about 0.02, mu up to 0.05).
 
 - The observables MLP (sklearn) is underfit. Use the `ceiling` rows instead. The mu ceiling has not saturated even at 200k episodes.
 - `qual` still needs a binned observables baseline in `probe.py` (`STATED_DIGITS` covers only `num` and `nat`). The block-size overflow is fixed.

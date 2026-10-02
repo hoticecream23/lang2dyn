@@ -12,7 +12,7 @@ from sklearn.linear_model import RidgeCV
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import r2_score
 import sim
-from train import GPT, encode, lm_loss, load
+from train import GPT, PAD, encode, load
 
 PROBE_SEED = 20_000_000
 TARGETS = ["x", "v", "a", "F", "log_m", "mu"]
@@ -165,11 +165,24 @@ def residuals(model, eps, stoi, channel, pool="end"):
 
 @torch.no_grad()
 def lm_loss_on(model, eps, stoi, channel):
-    """Mean next-token loss per sequence batch: does the model still predict the text well on these episodes?"""
-    X = encode([e["texts"][channel]["text"] for e in eps], stoi, model.cfg["block"]).cuda()
-    with torch.autocast("cuda", torch.bfloat16):
-        losses = [lm_loss(model, X[i:i + 100]).item() for i in range(0, len(X), 100)]
-    return sum(losses) / len(losses)
+    """Mean next-token loss per token: over all tokens, and over the tokens of spans where the cart is moving / stuck.
+    Stuck spans repeat the same values and are trivially predictable, so "moving" is the fair comparison across parts."""
+    sums = {k: [0.0, 0] for k in ("all", "moving", "stuck")}
+    for i in range(0, len(eps), 64):
+        chunk = eps[i:i + 64]
+        X = encode([e["texts"][channel]["text"] for e in chunk], stoi, model.cfg["block"]).cuda()
+        X = X[:, :int((X != PAD).sum(1).max())]
+        with torch.autocast("cuda", torch.bfloat16):
+            logits = model(X[:, :-1])
+        ce = torch.nn.functional.cross_entropy(logits.float().transpose(1, 2), X[:, 1:], reduction="none")  # ce[b, t-1]: loss of token t
+        masks = {"all": X[:, 1:] != PAD, "moving": torch.zeros_like(ce, dtype=torch.bool), "stuck": torch.zeros_like(ce, dtype=torch.bool)}
+        for b, e in enumerate(chunk):
+            for s0, s1, r in e["texts"][channel]["spans"]:
+                masks["moving" if e["traj"]["regime"][r] == "moving" else "stuck"][b, s0:s1] = True  # tokens s0+1..s1
+        for k, m in masks.items():
+            sums[k][0] += ce[m].sum().item()
+            sums[k][1] += int(m.sum())
+    return {k: total / max(count, 1) for k, (total, count) in sums.items()}
 
 
 def fit_eval(feats, y, train, test, make):
@@ -208,7 +221,7 @@ def main():
     else:
         eps, n_fit = sim.split_episodes(split, "train", n, PROBE_SEED) + sim.split_episodes(split, "test", n // 3, PROBE_SEED), n
         for name, part in (("train part", eps[:n]), ("test part", eps[n:])):
-            print(f"  LM loss on {name}: {lm_loss_on(model, part, stoi, channel):.4f}")
+            print(f"  LM loss on {name}: " + "  ".join(f"{k} {v:.4f}" for k, v in lm_loss_on(model, part, stoi, channel).items()))
     y, meta = targets(eps, channel)
     train, test = meta[:, 0] < n_fit, meta[:, 0] >= n_fit  # split by episode, not by span
     mt = meta[test]
