@@ -10,8 +10,9 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 - Identifiability is flagged separately for m and mu.
 - **Run 2 (`num`, 15k steps, RunPod RTX 4090) passed the decision gate for mass.** A linear probe on the trained model decodes log_m at R² 0.61, while a linear probe on the stated numbers gets 0.02 and the nonlinear ceiling is 0.64. Acceleration and mu are not evidence of computation (see `PROJECT_STATE.md`, "Results").
 - **Runs 3–5, the first channel comparison at equal training (45k steps, mean pooling):** log_m `num` 0.72 vs `nat` 0.60; mu 0.41 vs 0.32. Both channels have the same information ceiling (log_m 0.80), so language costs about 0.1 of extraction. Probe position was ruled out.
+- **Run 6 (`sym`) passed the sanity check** (log_m 0.70 vs `num` 0.72, mean pooling). It sets a noise floor: about 0.02 on log_m and up to 0.07 on mu. The `nat` mass gap is real; the mu gap needs more seeds.
 - **Stronger ceiling** (`probe.ceiling`, GPU MLP): log_m about 0.80, mu at least 0.67. Both channels sit well below it, mu most of all.
-- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt`, `ckpt/nat_run1.pt`, `ckpt/nat_45k.pt`, `ckpt/num_45k.pt` (gitignored).
+- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt`, `ckpt/nat_run1.pt`, `ckpt/nat_45k.pt`, `ckpt/num_45k.pt`, `ckpt/sym_45k.pt` (gitignored).
 
 ## Compute: RunPod
 
@@ -25,10 +26,11 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 ## Next steps, in order
 
-1. Train and probe `rel` and `sym` (both built and checked) at 45k steps. `sym` should match `num` (sanity check). `rel` should fail on m and mu (negative control). The `qual`/`rel` observables baselines are built. Run the `rel` ceiling with `CEIL=5000,50000`. `rel` carries partial m information (ridge log_m about 0.2), so judge the negative control against that, not against 0. Then train `qual`.
-2. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
-3. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
-4. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
+1. **`rel` 45k is running on the pod** (`rel45k_*.log`, then `ckpt/rel_45k.pt`). `sym` is done (run 6). Check the negative control: the trained `rel` probe on m and mu should not beat the `rel` observables baseline. The `qual`/`rel` observables baselines are built. Run the `rel` ceiling with `CEIL=5000,50000`. `rel` carries partial m information (ridge log_m about 0.2), so judge the negative control against that, not against 0. Then train `qual`.
+2. Run 2–3 seeds per channel (`num`, `nat`) to firm up the mu comparison. `train.py` uses `torch.manual_seed(0)`, so it needs a seed argument.
+3. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
+4. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
+5. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
 
 ## Prompt to paste into a new chat
 

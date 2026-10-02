@@ -188,6 +188,21 @@ Reading:
 - `num` 45k reaches about 0.72 of the 0.80 mass ceiling (mean pooling). `nat` reaches 0.60.
 - mu stays far below its ceiling in both channels (about 0.3–0.4 vs at least 0.67).
 
+### Run 6: `sym`, 45k steps on RunPod (2026-10-02): sanity check and noise floor
+
+`num` text under a fixed character substitution, same settings as run 5. Validation loss 0.2079 (`num` 45k: 0.2133). Checkpoint `ckpt/sym_45k.pt`, logs `train_sym_45k.log`, `probe_sym_45k_end.log`, `probe_sym_45k_mean.log`. Ceiling skipped (`CEIL=`), since it equals `num`'s.
+
+| trained ridge | log_m end | log_m mean | mu end | mu mean |
+|---|---|---|---|---|
+| `num` 45k | 0.64 | 0.72 | 0.31 | 0.41 |
+| `sym` 45k | 0.62 | 0.70 | 0.25 | 0.40 |
+| difference | 0.02 | 0.02 | 0.07 | 0.01 |
+
+Reading:
+- **Sanity check passed.** A char-level model from scratch does as well on ciphered `num` as on `num`.
+- **Run-to-run noise floor.** `sym` and `num` carry identical information, so their difference estimates seed-level variation: about 0.02 for log_m and up to 0.07 for mu (end pooling).
+- So the `nat` vs `num` gap on log_m (0.09–0.12) is well above noise. The mu gap (0.09–0.13) is only marginally above it and needs several seeds per channel before any claim.
+
 ## Channel facts (`rel`, `sym`, added 2026-10-02)
 
 - `rel` states only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, and push starts/stops/reverses/stronger/weaker. A push's direction appears only relative to the motion ("with/against its motion"). There are no numbers and **no times**. m and mu are not identifiable, but `rel` still carries partial information about them: a ridge on its stated codes gets log_m about 0.2 (400 episodes), probably because heavy carts get stuck more often. So the negative control is "trained probe ≤ `rel` ceiling", not "probe ≈ 0". Thresholds: `SAME_V = SAME_X = 0.05`.
@@ -196,6 +211,8 @@ Reading:
 - The `qual` and `rel` parsers now also return the motion direction, change word and start/stop event (`qual`), and the push-vs-motion relation plus the first sentence (`rel`, via `parse_rel_first`). All are checked in `_checks()`.
 
 ## Known issues and open questions
+
+- Single seed per channel. Seed noise is about 0.02 on log_m and up to 0.07 on mu (run 6). Any mu comparison needs 2–3 seeds per channel.
 
 - The observables MLP (sklearn) is underfit. Use the `ceiling` rows instead. The mu ceiling has not saturated even at 200k episodes.
 - `qual` still needs a binned observables baseline in `probe.py` (`STATED_DIGITS` covers only `num` and `nat`). The block-size overflow is fixed.
