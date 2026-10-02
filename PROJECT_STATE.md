@@ -203,6 +203,21 @@ Reading:
 - **Run-to-run noise floor.** `sym` and `num` carry identical information, so their difference estimates seed-level variation: about 0.02 for log_m and up to 0.07 for mu (end pooling).
 - So the `nat` vs `num` gap on log_m (0.09–0.12) is well above noise. The mu gap (0.09–0.13) is only marginally above it and needs several seeds per channel before any claim.
 
+### Run 7: `rel`, 45k steps on RunPod (2026-10-02): negative control
+
+Same settings as runs 5–6. 2074 s. Validation loss plateaued at 0.0341 by step 15k and ended at 0.0346 (slight overfitting). Checkpoint `ckpt/rel_45k.pt`, logs `train_rel_45k.log`, `probe_rel_45k_end.log`, `probe_rel_45k_mean.log`, `ceiling_rel.log`. The observables are the parsed comparison codes (`code_observables`).
+
+| | log_m end | log_m mean | mu end | mu mean |
+|---|---|---|---|---|
+| trained ridge | 0.19 | 0.21 | 0.16 | 0.20 |
+| observables ridge | 0.18 | 0.18 | 0.16 | 0.16 |
+| ceiling 5k / 50k episodes | 0.24 / 0.27 | | 0.22 / 0.25 | |
+
+Reading:
+- **Negative control passed.** When the text carries little mass information, the model doesn't invent it: it stays below the `rel` ceiling (0.27). Compare `num`, where the trained probe (0.64) far exceeds the linear observables baseline (0.02).
+- Identifiable and non-identifiable episodes score about the same with `rel`, as expected.
+- **Fraction of the available mass information the model extracts** (mean-pooled linear probe ÷ ceiling): `num` 0.72/0.80 ≈ 0.90, `nat` 0.60/0.80 ≈ 0.75, `rel` 0.21/0.27 ≈ 0.79. This ratio is a candidate headline metric per channel. The ceilings are lower bounds, so the ratios are upper bounds.
+
 ## Channel facts (`rel`, `sym`, added 2026-10-02)
 
 - `rel` states only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, and push starts/stops/reverses/stronger/weaker. A push's direction appears only relative to the motion ("with/against its motion"). There are no numbers and **no times**. m and mu are not identifiable, but `rel` still carries partial information about them: a ridge on its stated codes gets log_m about 0.2 (400 episodes), probably because heavy carts get stuck more often. So the negative control is "trained probe ≤ `rel` ceiling", not "probe ≈ 0". Thresholds: `SAME_V = SAME_X = 0.05`.

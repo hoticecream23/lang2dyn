@@ -1,6 +1,7 @@
 """Char-level GPT trained from scratch on one verbalizer channel. One episode per sequence.
 
-python train.py [channel=num] [n_episodes=100000] [steps=5000]   -> ckpt/<channel>.pt
+python train.py [channel=num] [n_episodes=100000] [steps=5000] [seed=0]   -> ckpt/<channel>.pt (seed 0) or ckpt/<channel>_s<seed>.pt
+seed sets weight init and batch order only; the training episodes are the same for every seed.
 Rerun the same command after an interruption to resume from the last 500-step save.
 """
 import math, os, sys, time
@@ -74,9 +75,10 @@ def load(path, device="cuda"):
 
 
 def main():
-    channel, n, steps = (sys.argv[1:] + [None] * 3)[:3]
-    channel, n, steps = channel or "num", int(n or 100_000), int(steps or 5000)
-    torch.manual_seed(0)
+    channel, n, steps, seed = (sys.argv[1:] + [None] * 4)[:4]
+    channel, n, steps, seed = channel or "num", int(n or 100_000), int(steps or 5000), int(seed or 0)
+    torch.manual_seed(seed)
+    name = channel if seed == 0 else f"{channel}_s{seed}"
     texts = lambda seeds: [sim.make_episode(s)["texts"][channel]["text"] for s in seeds]
     t0 = time.time()
     train_t, val_t = texts(range(n)), texts(range(VAL_SEED, VAL_SEED + 2000))
@@ -93,9 +95,9 @@ def main():
     lr = lambda s: min(1, s / 200) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * s / steps)))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr)
 
-    # resume: ckpt/<channel>_state.pt is written every 500 steps and deleted when the run finishes
+    # resume: ckpt/<name>_state.pt is written every 500 steps and deleted when the run finishes
     os.makedirs("ckpt", exist_ok=True)
-    state_path, start = f"ckpt/{channel}_state.pt", 0
+    state_path, start = f"ckpt/{name}_state.pt", 0
     if os.path.exists(state_path):
         st = torch.load(state_path, map_location="cuda", weights_only=True)
         if (st["n"], st["steps"], st["chars"]) == (n, steps, chars):
@@ -130,10 +132,10 @@ def main():
         opt.step()
         sched.step()
 
-    save({"model": model.state_dict(), "cfg": model.cfg, "chars": chars, "channel": channel}, f"ckpt/{channel}.pt")
+    save({"model": model.state_dict(), "cfg": model.cfg, "chars": chars, "channel": channel, "seed": seed}, f"ckpt/{name}.pt")
     if os.path.exists(state_path):
         os.remove(state_path)
-    print(f"saved ckpt/{channel}.pt")
+    print(f"saved ckpt/{name}.pt")
 
 
 if __name__ == "__main__":
