@@ -70,10 +70,12 @@ def simulate(p):
 
 
 def identifiable(tr):
-    """Kinetic regime gives a = F*(1/m) - g*s*mu, s = direction of motion.
-    m and mu are both identifiable iff two observed (F, s) rows are linearly independent."""
+    """-> {"m": bool, "mu": bool}. Kinetic regime gives a = F*(1/m) - g*s*mu, s = direction of motion.
+    Both are identifiable iff two observed (F, s) rows are linearly independent.
+    mu alone is also identifiable from any coast row (F = 0, a = -g*s*mu), which says nothing about m."""
     rows = {(F, sign(v) or sign(F)) for F, v, reg in zip(tr["F"], tr["v"], tr["regime"]) if reg == "moving"}
-    return any(F1 * s2 != F2 * s1 for (F1, s1), (F2, s2) in itertools.combinations(rows, 2))
+    both = any(F1 * s2 != F2 * s1 for (F1, s1), (F2, s2) in itertools.combinations(rows, 2))
+    return {"m": both, "mu": both or any(F == 0 for F, _ in rows)}
 
 
 def emit_steps(tr):
@@ -198,7 +200,7 @@ def _checks():
     # frictionless constant force: x = v0 t + F/(2m) t^2
     tr = ep(m=2.0, v0=1.0, F_segments=[[0.0, 4.0]])
     assert all(abs(x - (t + t * t)) < 1e-9 for t, x in zip(tr["t"], tr["x"]))
-    assert not identifiable(tr)  # single force level, one direction: m and mu confounded
+    assert identifiable(tr) == {"m": False, "mu": False}  # single force level, one direction: confounded
 
     # stiction: |F| < mu m g, cart never moves
     tr = ep(m=2.0, mu=0.5, F_segments=[[0.0, 5.0]])
@@ -210,20 +212,23 @@ def _checks():
     assert abs(tr["x"][-1] - 2.0 * stop / 2) < 1e-9
     r = tr["regime"].index("stuck")
     assert tr["events"][r] == ["stop"] and tr["t"][r - 1] < stop <= tr["t"][r]
-    assert not identifiable(tr)  # coast alone says nothing about m
+    assert identifiable(tr) == {"m": False, "mu": True}  # coast reveals mu, says nothing about m
 
     # strong opposing force: passes through zero and reverses, never stuck at a record
     tr = ep(mu=0.1, v0=2.0, F_segments=[[0.0, -10.0]])
     assert tr["v"][-1] < 0 and "stuck" not in tr["regime"]
 
     # force then coast: two independent (F, s) rows, identifiable
-    assert identifiable(ep(mu=0.2, v0=1.0, F_segments=[[0.0, 4.0], [1.0, 0.0]]))
+    assert identifiable(ep(mu=0.2, v0=1.0, F_segments=[[0.0, 4.0], [1.0, 0.0]])) == {"m": True, "mu": True}
+    # two force levels, no coast: both identifiable through rank 2
+    assert identifiable(ep(mu=0.1, v0=1.0, F_segments=[[0.0, 4.0], [1.0, 8.0]])) == {"m": True, "mu": True}
 
     # round trips over random episodes: spans align, parsers recover the verbalized state
-    n_id = 0
+    n_m = n_mu = 0
     for seed in range(500):
         e = make_episode(seed)
-        tr, n_id = e["traj"], n_id + e["identifiable"]
+        tr, n_m, n_mu = e["traj"], n_m + e["identifiable"]["m"], n_mu + e["identifiable"]["mu"]
+        assert e["identifiable"]["mu"] or not e["identifiable"]["m"]
         num, qual = e["texts"]["num"], e["texts"]["qual"]
         for s0, s1, r in num["spans"]:
             z = parse_num(num["text"][s0:s1])
@@ -244,7 +249,7 @@ def _checks():
     a, b = make_episode(7), make_episode(7, m=4.0)
     assert {k for k in a["params"] if a["params"][k] != b["params"][k]} <= {"m"} and b["cf_of"] == a["id"]
 
-    print(f"all checks passed; {n_id}/500 random episodes identifiable")
+    print(f"all checks passed; of 500 random episodes, m identifiable in {n_m}, mu in {n_mu}")
     print(make_episode(3)["texts"]["qual"]["text"])
 
 

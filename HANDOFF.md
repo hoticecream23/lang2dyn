@@ -6,19 +6,21 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 - The idea has been reviewed and the key design decisions are made (see `PROJECT_STATE.md`, "Decisions made").
 - Spec v0 is written.
-- The phase-1 simulator plus the `num` and `qual` verbalizers work, and `python sim.py` passes all checks (84% of random episodes identifiable).
-- The `num`-only pipeline runs end to end: char-level GPT, a 15-minute training run, probes. In run 1, the unstated variables a and m decode far above the random-init baseline. The probe ceiling and the identifiability control both still need fixing. Numbers are in `PROJECT_STATE.md`, "Results".
-- `ckpt/num.pt` exists locally (gitignored). Regenerate it with `python train.py num 100000 5000`.
+- The phase-1 simulator plus the `num` and `qual` verbalizers work. `python sim.py` passes all checks.
+- Identifiability is now flagged separately for m and mu.
+- The `num`-only pipeline runs end to end. With an MLP probe, run 1 decodes the unstated variable a at R² 0.80 and log_m at 0.51. mu stays weak at 0.14. The observables baselines (the key comparison) have not finished a run yet.
+- **We are moving training to cloud compute.** The local run 2 (15k steps) was stopped at step 7000. Only `ckpt/num_run1.pt` and `ckpt/num.pt` exist locally (identical, both gitignored).
 
 ## Next steps, in order
 
-1. **Make run 1's measurements trustworthy.**
-   - Split `identifiable` into separate flags for m and mu in `sim.py`. A coast identifies mu without m.
-   - Add an MLP probe and an observables baseline to `probe.py`. The baseline regresses the targets from ground-truth stated values (x, v, F history up to each span).
-   - Train longer (for example 15k steps), since loss was still falling.
-2. Add the `nat`, `rel` and `sym` verbalizers, each with a parser and a round-trip check in `_checks()`. `nat` will need a BPE tokenizer.
-3. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
-4. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins.
+1. **Cloud setup.**
+   - Done: checkpoint/resume in `train.py` (atomic save every 500 steps to `ckpt/<channel>_state.pt`; rerun the same command to resume) and `requirements.txt`.
+   - Push the repo to a remote the cloud machine can pull from.
+2. **Run 2 on cloud:** `python train.py num 100000 15000`, then `python probe.py ckpt/num.pt 3000`. Record the results in `PROJECT_STATE.md`.
+   - The key check: does the trained model's probe clearly beat the observables baseline on a and log_m? If yes, the signal is real, so move to step 3. If no, fix the probing method first.
+3. Add the `nat`, `rel` and `sym` verbalizers, each with a parser and a round-trip check in `_checks()`. `nat` will need a BPE tokenizer.
+4. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
+5. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins.
 
 ## Prompt to paste into a new chat
 

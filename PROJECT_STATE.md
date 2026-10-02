@@ -16,7 +16,7 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 | `Simulator_Verbalizer_Spec.md` | Spec v0: simulator, channels, information map, splits, episode record | current |
 | `sim.py` | Phase-1 simulator, `num` + `qual` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
 | `train.py` | Char-level GPT (6 layers, d=256, 4.9M params), one episode per sequence, writes `ckpt/<channel>.pt` | working |
-| `probe.py` | Ridge probes on the residual stream at span-end tokens, trained vs random-init, identifiability split | working |
+| `probe.py` | Ridge and MLP probes on the residual stream at span-end tokens. Baselines: random-init model, and observables (ridge and MLP on the ground-truth stated values, most recent span first). Hidden params split by per-param identifiability | working |
 | `PROJECT_STATE.md` | This file | |
 | `HANDOFF.md` | How to resume in a new chat | |
 
@@ -35,7 +35,7 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 - Recording: 50 steps at 0.1 s, integrated with 10 substeps of 0.01 s. Constant acceleration is integrated exactly; a zero-velocity crossing inside a substep is solved exactly and friction is re-evaluated there.
 - Force segments start on 0.1 s boundaries, and F is rounded to 0.1 N.
 - Emission: every 5 recorded steps, plus every step that has an event (`force_change`, `start`, `stop`).
-- `identifiable(tr)`: in the kinetic regime a = F·(1/m) − g·s·mu, so m and mu are both identifiable iff two observed (F, s) rows are linearly independent.
+- `identifiable(tr)` returns `{"m": bool, "mu": bool}`. In the kinetic regime a = F·(1/m) − g·s·mu, so both are identifiable iff two observed (F, s) rows are linearly independent. mu alone is also identifiable from any coast row (F = 0). Over 500 seeds: m is identifiable in 414 episodes, mu in 416.
 - `make_episode(seed, **changes)` builds a counterfactual twin (for example `m=4.0`), with `cf_of` pointing to the base id.
 - The surface template RNG is seeded with `f"{seed}-surface"`.
 - Commands: `python sim.py` runs the self-checks. `python sim.py N out.jsonl` writes N episodes.
@@ -61,11 +61,26 @@ Reading:
 - Random-init already reaches R² 0.15 for log_m. Observable correlates leak mass information (light carts reach larger |v| and |x|).
 - The identifiability control is confounded. The flag is joint, but a coast-only episode identifies mu without m, which likely explains why mu is reversed. The non-identifiable subset is also small (about 80 episodes).
 
+### Run 1, re-probed with the new `probe.py` (2026-10-02, partial)
+
+The run was stopped before the observables baselines finished. Best layer per target:
+
+| | x | v | a | F | log_m | mu |
+|---|---|---|---|---|---|---|
+| trained ridge | 0.77 | 0.70 | 0.57 | 0.86 | 0.44 | 0.16 |
+| trained MLP | 0.92 | 0.87 | 0.80 | 0.97 | 0.51 | 0.14 |
+| random-init ridge | 0.50 | 0.46 | 0.09 | 0.24 | 0.15 | 0.05 |
+
+Reading: much of the weak linear readout was a limit of the linear probe. With the MLP, stated values reach about 0.9 and a reaches 0.80. mu stays weak under every probe. Still missing: the observables baselines, which are the key comparison.
+
+### Run 2: 15k steps (aborted)
+
+Stopped at step 7000 (validation loss 0.2656, vs 0.294 at the end of run 1) to move to cloud compute. No checkpoint was saved. `ckpt/num_run1.pt` is a copy of the run 1 checkpoint.
+
 ## Known issues and open questions
 
-- The identifiability flag needs to be split into separate flags for m and mu (see run 1).
-- The probe ceiling is unknown. Needed: an MLP probe, and an "observables baseline" that regresses the targets directly from ground-truth stated values (x, v, F history up to the span). That baseline separates "the model computed it" from "it is linearly present in the stated numbers".
-- The run 1 model is undertrained (loss still falling).
+- mu is weakly represented under every probe. Possible causes: an undertrained model, mu's small effect on the dynamics (mu·g ≤ 2.94 m/s²), or entanglement with m.
+- `qual` texts exceed the 512-token block in `train.py` (assertion in `encode`). Raise the block size or shorten `qual` (for example, collapse repeated "It stays still.") before training on it.
 
 - `qual` repeats "It stays still." during long stuck stretches. This inflates token counts (the length confound). It could be collapsed into one sentence.
 - `qual` reports "a gentle push starts" when the force changes within the same bin. This is intended information loss, but worth noting in the paper.

@@ -1,6 +1,7 @@
 """Char-level GPT trained from scratch on one verbalizer channel. One episode per sequence.
 
 python train.py [channel=num] [n_episodes=100000] [steps=5000]   -> ckpt/<channel>.pt
+Rerun the same command after an interruption to resume from the last 500-step save.
 """
 import math, os, sys, time
 import torch, torch.nn as nn, torch.nn.functional as F
@@ -60,6 +61,11 @@ def lm_loss(model, xb):
     return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), xb[:, 1:].reshape(-1), ignore_index=PAD)
 
 
+def save(obj, path):
+    torch.save(obj, path + ".tmp")
+    os.replace(path + ".tmp", path)  # atomic: a write cut off by preemption never corrupts the last good save
+
+
 def load(path, device="cuda"):
     ck = torch.load(path, map_location=device, weights_only=True)
     model = GPT(**ck["cfg"]).to(device)
@@ -84,14 +90,33 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1)
     lr = lambda s: min(1, s / 200) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * s / steps)))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr)
+
+    # resume: ckpt/<channel>_state.pt is written every 500 steps and deleted when the run finishes
+    os.makedirs("ckpt", exist_ok=True)
+    state_path, start = f"ckpt/{channel}_state.pt", 0
+    if os.path.exists(state_path):
+        st = torch.load(state_path, map_location="cuda", weights_only=True)
+        if (st["n"], st["steps"], st["chars"]) == (n, steps, chars):
+            model.load_state_dict(st["model"])
+            opt.load_state_dict(st["opt"])
+            sched.load_state_dict(st["sched"])
+            torch.set_rng_state(st["rng"].cpu())  # same batch sequence as an uninterrupted run
+            start = st["step"]
+            print(f"resumed from step {start}", flush=True)
+        else:
+            print(f"ignoring {state_path}: saved by a run with different n/steps/vocab", flush=True)
+
     t0 = time.time()
-    for step in range(steps + 1):
+    for step in range(start, steps + 1):
         if step % 500 == 0:
             model.eval()
             with torch.no_grad(), torch.autocast("cuda", torch.bfloat16):
                 val = sum(lm_loss(model, V[i:i + 250]).item() for i in range(0, len(V), 250)) / (len(V) // 250)
             print(f"step {step:5d}  val {val:.4f}  {time.time() - t0:.0f}s", flush=True)
             model.train()
+            if step < steps:
+                save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
+                      "rng": torch.get_rng_state(), "step": step, "n": n, "steps": steps, "chars": chars}, state_path)
         if step == steps:
             break
         xb = X[torch.randint(len(X), (64,))].cuda(non_blocking=True)
@@ -103,8 +128,9 @@ def main():
         opt.step()
         sched.step()
 
-    os.makedirs("ckpt", exist_ok=True)
-    torch.save({"model": model.state_dict(), "cfg": model.cfg, "chars": chars, "channel": channel}, f"ckpt/{channel}.pt")
+    save({"model": model.state_dict(), "cfg": model.cfg, "chars": chars, "channel": channel}, f"ckpt/{channel}.pt")
+    if os.path.exists(state_path):
+        os.remove(state_path)
     print(f"saved ckpt/{channel}.pt")
 
 
