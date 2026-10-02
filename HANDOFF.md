@@ -6,12 +6,12 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 - The idea has been reviewed and the key design decisions are made (see `PROJECT_STATE.md`, "Decisions made").
 - Spec v0 is written.
-- The phase-1 simulator plus the `num`, `qual` and `nat` verbalizers work. `python sim.py` passes all checks.
+- The phase-1 simulator plus the `num`, `qual`, `nat`, `rel` and `sym` verbalizers work. `python sim.py` passes all checks.
 - Identifiability is flagged separately for m and mu.
 - **Run 2 (`num`, 15k steps, RunPod RTX 4090) passed the decision gate for mass.** A linear probe on the trained model decodes log_m at R² 0.61, while a linear probe on the stated numbers gets 0.02 and the nonlinear ceiling is 0.64. Acceleration and mu are not evidence of computation (see `PROJECT_STATE.md`, "Results").
-- **Runs 3–4 (`nat`):** mass is computed from language too. At 45k steps it nearly matches `num` at 15k (mean pooling: log_m 0.60 vs 0.67). Probe position was ruled out as the cause of the gap; undertraining explains most of it.
+- **Runs 3–5, the first channel comparison at equal training (45k steps, mean pooling):** log_m `num` 0.72 vs `nat` 0.60; mu 0.41 vs 0.32. Both channels have the same information ceiling (log_m 0.80), so language costs about 0.1 of extraction. Probe position was ruled out.
 - **Stronger ceiling** (`probe.ceiling`, GPU MLP): log_m about 0.80, mu at least 0.67. Both channels sit well below it, mu most of all.
-- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt`, `ckpt/nat_run1.pt`, `ckpt/nat_45k.pt` (gitignored).
+- Training resumes from checkpoints. Local checkpoints: `ckpt/num_run1.pt`, `ckpt/num_run2.pt`, `ckpt/nat_run1.pt`, `ckpt/nat_45k.pt`, `ckpt/num_45k.pt` (gitignored).
 
 ## Compute: RunPod
 
@@ -25,12 +25,10 @@ Read this file first in a new chat, then `PROJECT_STATE.md`. Read `Simulator_Ver
 
 ## Next steps, in order
 
-1. **Train `num` for 45k steps too** (RunPod, about 15 min), so both channels are compared at convergence. Probe with `end` and `mean` pooling. Run 4 showed most of the `nat` gap was undertraining.
-   - Consider checking convergence directly: is `nat` still improving at 45k? Validation loss went 0.0869 → 0.0833.
-2. Add the `rel` and `sym` verbalizers, plus a binned observables baseline so `qual` can be probed.
-3. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
-4. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
-5. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
+1. Train and probe `rel` and `sym` (both built and checked) at 45k steps. `sym` should match `num` (sanity check). `rel` should fail on m and mu (negative control). Add a comparison-code observables baseline for `rel` and a binned one for `qual`.
+2. Optional: a closed-form mu estimator from the trajectory, to get a true ceiling for mu.
+3. Build the dataset splits (`ood-combo` holds out m in [3, 5] × |F| in [7, 10]).
+4. Implement the interchange interventions using `make_episode(seed, m=...)` counterfactual twins. The mass representation at layer 6 is the first target.
 
 ## Prompt to paste into a new chat
 

@@ -244,6 +244,108 @@ def parse_nat(sentence):
     return z
 
 
+# ---- rel ----
+# Only comparisons with the previous sentence: faster/slower, further left/right, push stronger/weaker/reversed.
+# No numbers, no times, no absolute speed or position. m and mu are not identifiable from this channel.
+
+SAME_V, SAME_X = 0.05, 0.05  # changes smaller than this are reported as "about the same"
+
+
+def cmp(d, eps):
+    return 0 if abs(d) < eps else (1 if d > 0 else -1)
+
+
+def rel_codes(tr, r, prev):
+    """Ground-truth comparisons the rel sentence at step r states, relative to the sentence at step prev."""
+    v, vp, F, Fp = tr["v"][r], tr["v"][prev], tr["F"][r], tr["F"][prev]
+    z = {}
+    if "force_change" in tr["events"][r]:
+        z["push"] = ("stops" if F == 0 else "starts" if Fp == 0 else "reverses" if sign(F) != sign(Fp)
+                     else "stronger" if abs(F) > abs(Fp) else "weaker")
+    if "stop" in tr["events"][r]:
+        z["motion"] = "stops"
+    elif "start" in tr["events"][r]:
+        z["motion"] = "starts"
+    elif tr["regime"][r] == "stuck" or v == 0:
+        z["motion"] = "rest"
+    else:
+        z["speed"] = cmp(abs(v) - abs(vp), SAME_V)
+        z["reversed"] = bool(vp) and sign(v) != sign(vp)
+    if z.get("motion") != "rest":
+        z["x"] = cmp(tr["x"][r] - tr["x"][prev], SAME_X)
+    return z
+
+
+def relation(F, v):
+    return "" if not v else " with its motion" if sign(F) == sign(v) else " against its motion"
+
+
+def verbalize_rel(tr, rng):
+    out, prev = [], 0
+    for r in emit_steps(tr):
+        v, F = tr["v"][r], tr["F"][r]
+        if r == 0:
+            c = ["A cart is at rest." if v == 0 else "A cart is moving.",
+                 "Nothing pushes it." if F == 0 else f"A push acts on it{relation(F, v)}."]
+        else:
+            z, c = rel_codes(tr, r, prev), [rng.choice(["Later,", "Then,", "Next,"])]
+            push = {"stops": "the push stops.", "starts": f"a push starts{relation(F, v)}.",
+                    "reverses": "the push reverses.", "stronger": "the push grows stronger.",
+                    "weaker": "the push grows weaker."}
+            if "push" in z:
+                c.append(push[z["push"]])
+            motion = {"stops": "it comes to rest.", "starts": "it starts moving.", "rest": "it stays at rest."}
+            if "motion" in z:
+                c.append(motion[z["motion"]])
+            else:
+                pace = {1: "faster than before", -1: "slower than before", 0: "about as fast as before"}[z["speed"]]
+                c.append(f"it moves {pace}{', now the other way' if z['reversed'] else ''}.")
+            if "x" in z:
+                c.append({1: "It is further right than before.", -1: "It is further left than before.",
+                          0: "It is about where it was."}[z["x"]])
+            for i in range(2, len(c)):  # clauses after the first one start new sentences
+                c[i] = c[i][0].upper() + c[i][1:]
+        out.append((" ".join(c), r))
+        prev = r
+    return join(out)
+
+
+def parse_rel(sentence):
+    """Sentence (r > 0) -> the comparison codes it states, same keys as rel_codes."""
+    z = {}
+    for k, pat in [("stops", "push stops"), ("starts", "push starts"), ("reverses", "push reverses"),
+                   ("stronger", "grows stronger"), ("weaker", "grows weaker")]:
+        if pat in sentence:
+            z["push"] = k
+    for k, pat in [("stops", "comes to rest"), ("starts", "starts moving"), ("rest", "stays at rest")]:
+        if pat in sentence:
+            z["motion"] = k
+    if mo := re.search(r"moves (faster|slower|about as fast) ", sentence):
+        z["speed"] = {"faster": 1, "slower": -1, "about as fast": 0}[mo[1]]
+        z["reversed"] = "the other way" in sentence
+    for k, pat in [(1, "further right"), (-1, "further left"), (0, "about where it was")]:
+        if pat in sentence:
+            z["x"] = k
+    return z
+
+
+# ---- sym ----
+# num text under a fixed random character substitution (spaces included). Same information, positions and
+# lengths as num, no readable symbols. For a from-scratch char model this should match num (sanity check).
+
+SYM_PLAIN = "0123456789.+-=txvF "
+SYM_CODE = dict(zip(SYM_PLAIN, random.Random("sym-cipher").sample("abcdefghijklmnopqrs", len(SYM_PLAIN))))
+SYM_DECODE = {v: k for k, v in SYM_CODE.items()}
+
+
+def verbalize_sym(num):
+    return {"text": "".join(SYM_CODE[c] for c in num["text"]), "spans": num["spans"]}
+
+
+def parse_sym(sentence):
+    return parse_num("".join(SYM_DECODE[c] for c in sentence))
+
+
 def make_episode(seed, **changes):
     """changes (e.g. m=3.0) make a counterfactual twin: same sampled params, one value overridden."""
     p = {**sample_params(random.Random(seed)), **changes}
@@ -254,8 +356,9 @@ def make_episode(seed, **changes):
         "params": p,
         "traj": tr,
         "identifiable": identifiable(tr),
-        "texts": {"num": verbalize_num(tr), "qual": verbalize_qual(tr, p["m"], random.Random(f"{seed}-surface")),
-                  "nat": verbalize_nat(tr, random.Random(f"{seed}-surface-nat"))},
+        "texts": {"num": (num := verbalize_num(tr)), "qual": verbalize_qual(tr, p["m"], random.Random(f"{seed}-surface")),
+                  "nat": verbalize_nat(tr, random.Random(f"{seed}-surface-nat")),
+                  "rel": verbalize_rel(tr, random.Random(f"{seed}-surface-rel")), "sym": verbalize_sym(num)},
         "cf_of": base if changes else None,
         "cf_change": changes or None,
     }
@@ -322,6 +425,14 @@ def _checks():
                 assert z["F"] == tr["F"][r]
             else:
                 assert "F" not in z
+        rel, prev = e["texts"]["rel"], 0
+        for s0, s1, r in rel["spans"][1:]:  # the first sentence states only rest/moving and push/no push
+            assert parse_rel(rel["text"][s0:s1]) == rel_codes(tr, r, prev), (seed, r, rel["text"][s0:s1])
+            prev = r
+        sym = e["texts"]["sym"]
+        assert sym["spans"] == num["spans"] and not set(sym["text"]) & set("0123456789. ")
+        for s0, s1, r in sym["spans"]:
+            assert parse_sym(sym["text"][s0:s1]) == parse_num(num["text"][s0:s1])
 
     # counterfactual twin differs only in the overridden param
     a, b = make_episode(7), make_episode(7, m=4.0)

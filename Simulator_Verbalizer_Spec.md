@@ -61,7 +61,7 @@ Every verbalizer is a deterministic function `g_i(trajectory, surface_seed)`. `s
 | `num` | Explicit numeric | `t=0.0 x=1.20 v=0.00 F=+4.0 . t=0.5 x=1.38 v=0.71 F=+4.0 .` |
 | `nat` | Ordinary language, rounded numbers | `A cart rests at 1.2 m. A 4 N push to the right begins. Half a second later it is moving at 0.7 m/s.` |
 | `qual` | Qualitative bins only | `A heavy cart sits still. A gentle push to the right starts. It speeds up slowly.` |
-| `rel` | Relational, comparing across time | `The push grows stronger than before. The cart now moves faster than it did earlier.` |
+| `rel` | Relational, comparing with the previous sentence; no numbers or times | `Then, the push grows stronger. It moves faster than before. It is further right than before.` |
 | `sym` | Symbolic control | `num` content rewritten with a random bijective vocabulary (`t=0.0` becomes `q7 0.0`, and so on) |
 
 `sym` matters only for pretrained models, because it removes the meaning that English words carry. For from-scratch models it should match `num`, and that equality is itself a sanity check.

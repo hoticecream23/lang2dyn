@@ -14,7 +14,7 @@ Working title: *From Language to Dynamics: Identifying Latent Physical States an
 |---|---|---|
 | `project_idea.md` | Original idea and novelty analysis (LLM-generated citations, unverified) | reference |
 | `Simulator_Verbalizer_Spec.md` | Spec v0: simulator, channels, information map, splits, episode record | current |
-| `sim.py` | Phase-1 simulator, `num` + `qual` + `nat` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
+| `sim.py` | Phase-1 simulator, `num` + `qual` + `nat` + `rel` + `sym` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
 | `train.py` | Char-level GPT (6 layers, d=256, 4.9M params), one episode per sequence, writes `ckpt/<channel>.pt` | working |
 | `probe.py` | Ridge and MLP probes on the residual stream at span-end tokens. Baselines: random-init model, and observables (ridge and MLP on the ground-truth stated values, most recent span first). Hidden params split by per-param identifiability | working |
 | `PROJECT_STATE.md` | This file | |
@@ -168,9 +168,31 @@ Fresh run, cosine schedule over 45k steps, 2349 s on an RTX 4090. Validation los
 | ceiling (200k episodes) | 0.80 | 0.80 | ≥0.67 | ≥0.67 |
 
 Reading:
-- **Most of the `nat` vs `num` gap was undertraining.** Tripling the steps closes about 70% of it (mean pooling: a gap of 0.19 shrinks to 0.07). Fair channel comparisons need every model trained to convergence, so `num` also needs a 45k run.
+- Tripling the steps narrows the gap to `num` 15k from 0.19 to 0.07 (mean pooling). **Superseded by run 5:** at equal steps, the gap is about 0.1.
 - **Both channels sit well below the ceiling,** for mass (about 0.6 vs 0.8) and especially for mu (about 0.3 vs at least 0.67). The information is in the text, but the model doesn't extract all of it. This gap is a headline quantity for the project.
 - Stated variables still decode worse in `nat` at the end token (x 0.40 vs 0.79 for `num`). With mean pooling they recover (x 0.61, v 0.60).
+
+### Run 5: `num`, 45k steps on RunPod (2026-10-02) — channels compared at equal training
+
+Fresh run, 1074 s on an RTX 4090, validation loss 0.2133 (15k: 0.2309). Checkpoint `ckpt/num_45k.pt`, logs `train_num_45k.log`, `probe_num_45k_end.log`, `probe_num_45k_mean.log`.
+
+| trained ridge | log_m end | log_m mean | mu end | mu mean |
+|---|---|---|---|---|
+| `num` 45k | 0.64 | **0.72** | 0.31 | **0.41** |
+| `nat` 45k | 0.55 | **0.60** | 0.18 | **0.32** |
+| gap | 0.09 | 0.12 | 0.13 | 0.09 |
+| ceiling (200k episodes) | 0.80 | 0.80 | ≥0.67 | ≥0.67 |
+
+Reading:
+- **Correction to run 4's reading.** "70% of the gap was undertraining" compared `nat` 45k with `num` 15k. `num` also improves with training, so at equal steps a real gap of about 0.1 remains on both hidden parameters. Language costs extraction even though the information ceiling is identical.
+- `num` 45k reaches about 0.72 of the 0.80 mass ceiling (mean pooling). `nat` reaches 0.60.
+- mu stays far below its ceiling in both channels (about 0.3–0.4 vs at least 0.67).
+
+## Channel facts (`rel`, `sym`, added 2026-10-02)
+
+- `rel` states only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, and push starts/stops/reverses/stronger/weaker. A push's direction appears only relative to the motion ("with/against its motion"). There are no numbers and **no times**. m and mu are not identifiable, so `rel` is a negative control for the hidden-parameter probes. Thresholds: `SAME_V = SAME_X = 0.05`.
+- `sym` is `num` under a fixed random character substitution, spaces included. It has the same spans and lengths as `num`. For a from-scratch char model it should match `num`, so it's a sanity check. It matters only for pretrained models.
+- `probe.py` skips the observables and ceiling rows for `qual` and `rel` (no numeric baseline yet). `CEIL=""` skips the ceiling for smoke tests; `CEIL=5000,50000,200000` sets the sizes.
 
 ## Known issues and open questions
 
@@ -184,7 +206,7 @@ Reading:
 
 ## Not built yet
 
-- Verbalizers: `rel`, `sym`, and the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
+- Verbalizers: the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
 - Dataset splits: `iid`, `ood-combo`, `ood-extrap`, `compose`, `cross-channel`. The `ood-combo` and `ood-extrap` splits need param-region filtering in `sample_params` or at dataset-build time.
 - The interchange intervention code.
 - Phase 2: collisions.

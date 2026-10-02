@@ -4,7 +4,7 @@ random-init model (same probe), and "observables" (probes fed the ground-truth s
 
 python probe.py [ckpt=ckpt/num.pt] [n_episodes=3000] [pool=end|mean]
 """
-import sys, time
+import os, sys, time
 import numpy as np, torch
 from sklearn.linear_model import RidgeCV
 from sklearn.neural_network import MLPRegressor
@@ -15,9 +15,11 @@ from train import GPT, encode, load
 PROBE_SEED = 20_000_000
 TARGETS = ["x", "v", "a", "F", "log_m", "mu"]
 MAX_SPANS = 24  # observables history slots
-STATED_DIGITS = {"num": 2, "nat": 1}  # decimals each channel states x and v with (qual needs a binned baseline, not built)
+STATED_DIGITS = {"num": 2, "nat": 1, "sym": 2}  # decimals each channel states x and v with
+# qual and rel state no numbers; their observables baselines (bins, comparison codes) are not built, so they are skipped
 CEIL_SEED = 30_000_000
-CEIL_EPISODES = (5_000, 50_000)  # two sizes, to see whether the ceiling has saturated
+# two sizes, to see whether the ceiling has saturated. CEIL="" skips it (smoke tests); CEIL=5000,50000,200000 adds sizes
+CEIL_EPISODES = tuple(int(k) for k in os.environ.get("CEIL", "5000,50000").split(",") if k)
 
 
 def ridge():
@@ -145,18 +147,20 @@ def main():
     res = {}  # name -> (r2 per layer, preds per layer)
     t0 = time.time()
     feats = residuals(model, eps, stoi, channel, pool)
-    for name, f, make in [("trained ridge", feats, ridge), ("trained mlp", feats, mlp),
-                          ("random-init ridge", residuals(rand, eps, stoi, channel, pool), ridge),
-                          ("observables ridge", [observables(eps, channel)], ridge),
-                          ("observables mlp", [observables(eps, channel)], mlp)]:
+    runs = [("trained ridge", feats, ridge), ("trained mlp", feats, mlp),
+            ("random-init ridge", residuals(rand, eps, stoi, channel, pool), ridge)]
+    has_obs = channel in STATED_DIGITS
+    if has_obs:
+        runs += [("observables ridge", [observables(eps, channel)], ridge), ("observables mlp", [observables(eps, channel)], mlp)]
+    for name, f, make in runs:
         r2, preds, yt = fit_eval(f, y, train, test, make)
         res[name] = (r2, preds)
         if len(r2) > 1:
             table(f"{name}, channel {channel}", r2)
         print(f"  [{name} done, {time.time() - t0:.0f}s]", flush=True)
 
-    X_test = observables(eps, channel)[test]
-    for n_ceil in CEIL_EPISODES:
+    X_test = observables(eps, channel)[test] if has_obs else None
+    for n_ceil in CEIL_EPISODES if has_obs else ():
         p = ceiling(channel, X_test, y[train].mean(0), y[train].std(0), n_ceil)
         res[f"ceiling {n_ceil // 1000}k eps"] = (np.array([[r2_score(yt[:, j], p[:, j]) for j in range(len(TARGETS))]]), [p])
         print(f"  [ceiling {n_ceil} episodes done, {time.time() - t0:.0f}s]", flush=True)
@@ -170,7 +174,9 @@ def main():
     print("\nhidden params, spans with step >= 25, by identifiability of that param")
     late = mt[:, 1] >= 25
     for j, flag in ((TARGETS.index("log_m"), 2), (TARGETS.index("mu"), 3)):
-        for name in ("trained ridge", "trained mlp", "observables mlp", f"ceiling {CEIL_EPISODES[-1] // 1000}k eps"):
+        for name in ("trained ridge", "trained mlp", "observables mlp", f"ceiling {CEIL_EPISODES[-1] // 1000}k eps" if CEIL_EPISODES else ""):
+            if name not in res:
+                continue
             r2, preds = res[name]
             L = int(r2[:, j].argmax())
             cells = []
