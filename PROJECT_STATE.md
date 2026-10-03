@@ -1,6 +1,6 @@
 # Project State
 
-Last updated: 2026-10-01
+Last updated: 2026-10-03
 
 ## Research question
 
@@ -8,38 +8,113 @@ Can next-token prediction on language alone recover both latent physical **state
 
 Working title: *From Language to Dynamics: Identifying Latent Physical States and Operators Learned from Linguistic Observations.*
 
+## Headline findings so far
+
+All numbers are best-layer linear-probe scores on held-out episodes. The hidden parameters are log_m (mass) and mu (friction), which `num`, `nat` and `sym` never state.
+
+1. **Models compute hidden physical parameters from text.** `num` (3 seeds, 45k steps): log_m 0.707 ± 0.011 (mean pooling), while a linear probe on the stated numbers gets 0.02. Mass is computed from the dynamics and stored as a linear feature.
+2. **Language costs extraction, not information.** `nat` (the same trajectories in words) has the same information ceiling as `num` (log_m about 0.80), but the model extracts less: log_m 0.613 ± 0.017 vs 0.707 ± 0.011, and mu at the end token 0.189 ± 0.007 vs 0.296 ± 0.015. All gaps are many SEs from 0, except mean-pooled mu (t 2.6).
+3. **Models stay below the ceiling, mu most of all.** Ceiling (GPU MLP on the stated values, 200k episodes): log_m 0.80, mu ≥ 0.67, not saturated. Models reach mu of about 0.3–0.4.
+4. **Controls pass.** `sym` (ciphered `num`) matches `num` within seed noise. `rel` (comparisons only) stays below its own ceiling (log_m 0.21 vs 0.27): no information is invented.
+5. **Generalization (first look).** On unseen masses (5–8), next-token loss on moving spans rises 10–14% (`qual`: 36%). Probes fit on m ≤ 5 fail to extrapolate for every decoder, so probes are the wrong tool there.
+6. **Interventions (first pass, `num` 45k).**
+   - The log_m probe direction is causally inert.
+   - No 1-D mass variable exists.
+   - A 32-D DAS subspace at layer 4, patched at every position, transfers part of another episode's mass effect. Seed 0: src slope 0.31, r 0.53 (shuffled-source control 0.10). The effect is positive but smaller in seeds 1–2 (CE gap 0.008 vs 0.021).
+   - Writing the true log m into an 8- to 32-D subspace at L3–L5 makes the model produce F-dependent counterfactual velocities (slope about 0.6–0.74, r up to 0.9 on unseen mass values).
+   - So the model's dynamics computation reads a mass variable, but holds it distributed and redundantly across positions.
+7. **Not yet tested:** the `ood-combo` / `compose` splits, and interventions on `nat` or on models trained on `ood-combo`.
+
 ## Files
 
 | File | Purpose | Status |
 |---|---|---|
 | `project_idea.md` | Original idea and novelty analysis (LLM-generated citations, unverified) | reference |
-| `Simulator_Verbalizer_Spec.md` | Spec v0: simulator, channels, information map, splits, episode record | current |
-| `sim.py` | Phase-1 simulator, `num` + `qual` + `nat` + `rel` + `sym` verbalizers and parsers, counterfactual twins, self-checks | working, all checks pass |
-| `train.py` | Char-level GPT (6 layers, d=256, 4.9M params), one episode per sequence, writes `ckpt/<channel>.pt` | working |
-| `probe.py` | Ridge and MLP probes on the residual stream at span-end tokens. Baselines: random-init model, and observables (ridge and MLP on the ground-truth stated values, most recent span first). Hidden params split by per-param identifiability | working |
-| `PROJECT_STATE.md` | This file | |
+| `Simulator_Verbalizer_Spec.md` | Spec: simulator, channels, information map, splits, episode record | matches code (v1) |
+| `sim.py` | Simulator; `num`, `nat`, `qual`, `rel`, `sym` verbalizers and parsers; identifiability; counterfactual twins; dataset splits; self-checks | all checks pass |
+| `train.py` | Char-level GPT from scratch (6 layers, d=256, 8 heads, about 5M params), one episode per sequence, with resume, seed and split arguments | working |
+| `probe.py` | Ridge/MLP probes on the residual stream (end or mean pooling), random-init and observables baselines, GPU-MLP ceiling, OOD scoring, next-token loss split by moving/stuck spans | working |
+| `intervene.py` | Interchange interventions on mass (`num` only): counterfactual pairs, DAS / steering / probe / random directions, greedy-decode and CE scoring | working |
+| `requirements.txt` | torch ≥ 2.6, numpy, scikit-learn, psutil | |
 | `HANDOFF.md` | How to resume in a new chat | |
+| `ckpt/*.pt`, `*.log` | Checkpoints and logs (gitignored, local only). Each results section names its files | |
 
 ## Decisions made
 
 1. **Operator recovery is defined through interchange interventions.** Patch the internal representation of m (or F, or mu) from episode B into episode A. The model's continuation should match the simulator's counterfactual A-with-B's-value. Score this on held-out (m, F) regions so lookup is separated from computation. Use the causal abstraction / DAS framework, with the simulator as the high-level model.
-2. **Drop direct estimation of I(W;L_i).** The verbalizers are designed by us, so each channel's information content is known by construction (the information map in the spec). Optional later: an InfoNCE dual encoder as a lower-bound "capacity meter", or a supervised text-to-z regressor as a decodability ceiling.
-3. **A dual encoder is not the main model.** It would see z (which breaks the language-only condition), it has no dynamics, and it tests a different objective. Keep it only as a measuring instrument.
-4. **Train small GPTs from scratch as the primary setting** (6–8 layers, 20–50M params). Pretrained LMs are a secondary comparison only, because of their physics priors.
+2. **Drop direct estimation of I(W;L_i).** The verbalizers are designed by us, so each channel's information content is known by construction (the information map in the spec). The decodability ceiling is a GPU MLP trained on the stated values (see 9).
+3. **A dual encoder is not the main model.** It would see z (which breaks the language-only condition), it has no dynamics, and it tests a different objective. Keep it only as a possible measuring instrument.
+4. **Train small GPTs from scratch as the primary setting** (so far 6 layers, d=256, about 5M params). Pretrained LMs are a secondary comparison only, because of their physics priors.
 5. **The headline probes target inferable-but-unstated variables** (the I cells in the information map). Probes on stated variables measure token copying and serve as baselines.
 6. **Phase 1 is one cart with piecewise force, kinetic friction and stiction.** Collisions are phase 2.
-7. **mu was narrowed from 0–0.5 to 0–0.3.** With 0–0.5, static friction (up to 24.5 N) swallowed many force segments: 33% of steps stuck, 71% of episodes identifiable. With 0–0.3: 19% stuck, 84% identifiable (2000 seeds). About 10% of episodes are deliberate single-segment controls, so the ceiling is roughly 90%.
-8. **One char-level tokenizer for every channel, no BPE.** A shared tokenizer removes the tokenizer as a confound between channels. `train.py` sets the context length from the data (1.25 × the longest training text, rounded up to 64): about 576 tokens for `num`, about 1472 for `nat`.
+7. **mu was narrowed from 0–0.5 to 0–0.3.** With 0–0.5, static friction (up to 24.5 N) swallowed many force segments: 33% of steps stuck, 71% of episodes identifiable. With 0–0.3: 19% stuck, 84% identifiable (2000 seeds). About 10% of episodes are deliberate single-segment controls.
+8. **One char-level tokenizer for every channel, no BPE.** A shared tokenizer removes the tokenizer as a confound between channels. `train.py` sets the context length from the data (1.25 × the longest training text, rounded up to 64): 576 tokens for `num`/`sym`, 1472 for `nat`.
+9. **Ceiling = GPU MLP on the observables** (`probe.ceiling`, two 512-wide hidden layers, early stopping), trained on fresh episodes. The sklearn "observables MLP" row is underfit and is not a ceiling. Ceilings are lower bounds on the true information content.
+10. **Standard comparison setting:** 100k training episodes, 45k steps, batch 64, both poolings reported. Channel gaps need 2–3 seeds or more (seed noise: log_m about 0.02, mu up to 0.05).
+11. **OOD evaluation:** probes are fit on a split's train part and scored on its test part as 1 − MSE/Var_train (plain R² explodes on narrow test regions). Model behavior is judged by next-token loss on **moving** spans only, because stuck text is about 9× easier and its share varies between parts.
+12. **Interventions are scored by the source-difference metric** (`src slope`/`r` in `intervene.py`), not by IIA or effect alone. Erasing A's mass already moves predictions toward a random B's counterfactual, so IIA rises even with a source-independent patch. Pairs use force-change prompts, because elsewhere the model can extrapolate Δv without mass. `das-steer` (writing the true value) is reported as an upper bound, not as an interchange.
 
-## sim.py facts
+## Code facts
+
+### `sim.py`
 
 - Recording: 50 steps at 0.1 s, integrated with 10 substeps of 0.01 s. Constant acceleration is integrated exactly; a zero-velocity crossing inside a substep is solved exactly and friction is re-evaluated there.
-- Force segments start on 0.1 s boundaries, and F is rounded to 0.1 N.
-- Emission: every 5 recorded steps, plus every step that has an event (`force_change`, `start`, `stop`).
-- `identifiable(tr)` returns `{"m": bool, "mu": bool}`. In the kinetic regime a = F·(1/m) − g·s·mu, so both are identifiable iff two observed (F, s) rows are linearly independent. mu alone is also identifiable from any coast row (F = 0). Over 500 seeds: m is identifiable in 414 episodes, mu in 416.
-- `make_episode(seed, **changes)` builds a counterfactual twin (for example `m=4.0`), with `cf_of` pointing to the base id.
-- The surface template RNG is seeded with `f"{seed}-surface"`.
+- Sampling: 10% of episodes have one force segment (mostly non-identifiable), the rest have 2–4. 30% of multi-segment episodes get one coast segment (F = 0). Segments start on 0.1 s boundaries, and F is rounded to 0.1 N.
+- Emission: every 5 recorded steps, plus every step with an event (`force_change`, `start`, `stop`). Each emitted step is one span `[char_start, char_end, step]`.
+- `identifiable(tr)` returns `{"m": bool, "mu": bool}`. In the kinetic regime a = F·(1/m) − g·s·mu, so both are identifiable iff two observed (F, s) rows are linearly independent. mu alone is also identifiable from any coast row. Over 500 seeds: m is identifiable in 414 episodes, mu in 416.
+- `make_episode(seed, **changes)`: changes make a counterfactual twin (for example `m=4.0`), with `cf_of` pointing to the base id.
+- `make_episode(seed, m_switch=[r0, m])`: the mass changes to m at recorded step r0 (the state at r0 is unchanged). The text is identical to the original up to step r0. Used as the intervention target.
+- Template RNG seeds: `qual` uses `f"{seed}-surface"`, `nat` `f"{seed}-surface-nat"`, `rel` `f"{seed}-surface-rel"`. Each sentence type has 2–3 phrasings.
 - Commands: `python sim.py` runs the self-checks. `python sim.py N out.jsonl` writes N episodes.
+
+### Channels
+
+- `num`: `t=… x=… v=… F=… .` per span; x and v to 0.01, F exact.
+- `nat`: words, with x and v to 0.1, F exact when it changes, and time only as gaps ("0.5 s later"). Never states a, m or mu.
+- `qual`: bins only.
+  - mass light/medium/heavy (< 1, 1–2.5, > 2.5 kg)
+  - push gentle/firm/hard (< 3, 3–7, > 7 N), with direction
+  - speed still/slow/steady/fast (< 0.05, < 1, < 3, ≥ 3 m/s)
+  - change words: speeds up slowly/quickly, slows down gently/sharply, keeps its pace
+  - events: starts moving, halts / comes to a stop, stays still
+
+  **It states a mass bin.** It repeats "It stays still." while stuck (a length confound).
+- `rel`: only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, push starts/stops/reverses/stronger/weaker, push with/against the motion. No numbers, no times. Thresholds `SAME_V = SAME_X = 0.05`. m and mu are not identifiable, but `rel` still carries partial information (ceiling log_m 0.27), probably because heavy carts get stuck more often. So the negative control is "probe ≤ `rel` ceiling", not "probe ≈ 0".
+- `sym`: `num` under a fixed random character substitution (spaces included), with the same spans and lengths. For a from-scratch char model it should match `num`; it matters only for pretrained models.
+
+### `train.py`
+
+- `python train.py [channel=num] [n=100000] [steps=5000] [seed=0] [split=iid]` writes `ckpt/<channel>[_<split>][_s<seed>].pt`. The default is 5000 steps, but the standard setting is 45000.
+- AdamW lr 1e-3, betas (0.9, 0.95), weight decay 0.1, 200-step warmup, cosine decay to 10%, batch 64, bf16 autocast, grad clip 1.0. Validation: 2000 episodes from seed 10M (from that split's train part).
+- Resume: atomic save to `ckpt/<name>_state.pt` every 500 steps. Rerun the same command to resume; the state file is deleted at the end.
+- The seed changes weight init and batch order only; the training episodes are seeds 0..n−1 for every seed.
+
+### `probe.py`
+
+- `python probe.py [ckpt=ckpt/num.pt] [n=3000] [pool=end|mean] [split=iid]`. The `CEIL` env variable sets the ceiling sizes (default `5000,50000`). `CEIL=` skips the ceiling, for smoke tests or when it's already known.
+- Probe episodes: seeds 20M+. iid: fit on 75%, score on 25%, split by episode. OOD splits: fit on n train-part episodes, score on n/3 test-part episodes.
+- Rows: trained ridge/MLP (every layer), random-init ridge, observables ridge/MLP (sklearn), and the ceiling (GPU MLP, seeds 30M+). Then the late-span (step ≥ 25) split by each parameter's identifiability flag.
+- Observables:
+  - `num`/`nat`/`sym`: the stated values (t, x, v, F) at the channel's precision, history most recent first.
+  - `qual`/`rel`: one-hot parser codes (`code_observables`; 23 `qual` codes, 24 `rel` codes). Each row holds the latest value of every key plus the per-sentence history. The vocab comes from seeds 40M+.
+- `lm_loss_on(model, eps, stoi, channel)` returns per-token loss over all / moving / stuck spans. It is printed for OOD splits.
+
+### `intervene.py`
+
+- `python intervene.py [ckpt=ckpt/num_45k.pt] [n_train=2000] [n_test=400] [n_probe=2000] [k=1] [pos=all|last|span]`. Env options: `LAYERS=3,4,5` (default 1–6), `SRC=mean|end` (B's source activation), `BSRC=last|fc` (B's source span), `BID=1` (B's prefix must identify m_B), `STEER=logm|invm`.
+- Pairs (seeds 50M+, A = even seed, B = the next seed): A's prompt ends at a span where a new nonzero force starts (step r0 ≥ 10), so the next velocity needs F/m. Target: `m_switch=[r0, m_B]`. Pairs are kept when the counterfactual changes v at the next emitted step r1 by at least 0.05 and emits the same step. B masses in [2, 3] are held out of DAS training.
+- Intervention: at layer L's output, overwrite A's coordinates in a k-dim orthonormal subspace U with c, at positions given by `pos`: `all`; `last` = from A's last prompt span on, generated tokens included; `span` = that span only.
+- Conditions:
+  - `das`: U learned with the model frozen, teacher-forced CE on the counterfactual span; c = B's activations (mean over its source span) projected on U.
+  - `das-shuf`: as `das`, but trained with another pair's B as source.
+  - `ablate`: c = the mean c.
+  - `das-steer`: c = α·log m_B + β, learned. Not an interchange: it writes the true value.
+  - `probe` / `random` directions (k = 1).
+- Metrics on held-out pairs:
+  - greedy-decoded v at r1: `effect` = (v_patched − v_clean)/(v_cf − v_A), median; `iia` = share closer to v_cf than to v_A.
+  - **`src slope` / `r`** = regression of v_patched(B) − v_patched(B′) on v_cf(B) − v_cf(B′), with B′ a second source for the same A. This is the key number: erasing A's mass already moves v toward a random B's counterfactual (regression to the mean), and `src` is 0 for any source-independent change.
+  - Teacher-forced target CE with the matched source and with B′.
+- Timing on a 4090: about 3–4 min per layer at 2000/400 pairs. Several runs can share the GPU.
 
 ## Results
 
@@ -60,7 +135,7 @@ Reading:
 - Positive signal: the unstated variables a and m decode far above the random-init baseline.
 - The probe readout is weak even for stated variables (x and v reach only about 0.75), so the linear probe at the "." token is not near its ceiling.
 - Random-init already reaches R² 0.15 for log_m. Observable correlates leak mass information (light carts reach larger |v| and |x|).
-- The identifiability control is confounded. The flag is joint, but a coast-only episode identifies mu without m, which likely explains why mu is reversed. The non-identifiable subset is also small (about 80 episodes).
+- The identifiability control is confounded. The flag is joint, but a coast-only episode identifies mu without m. The non-identifiable subset is also small (about 80 episodes). *(Fixed later: per-parameter flags. The reversed mu pattern turned out to be a weak-baseline artifact; see "Stronger ceiling".)*
 
 ### Run 1, re-probed with the new `probe.py` (2026-10-02, partial)
 
@@ -86,7 +161,7 @@ Best layer per target:
 | trained MLP | 0.92 | 0.90 | 0.85 | 0.96 | 0.62 | 0.20 |
 | random-init ridge | 0.50 | 0.46 | 0.09 | 0.24 | 0.15 | 0.05 |
 | observables ridge | 1.00 | 1.00 | 0.75 | 1.00 | **0.02** | 0.03 |
-| observables MLP (ceiling) | 1.00 | 1.00 | 0.88 | 1.00 | 0.64 | 0.18 |
+| observables MLP (sklearn, underfit; not a ceiling) | 1.00 | 1.00 | 0.88 | 1.00 | 0.64 | 0.18 |
 
 Late spans (step ≥ 25), split by each parameter's own flag:
 
@@ -96,10 +171,10 @@ Late spans (step ≥ 25), split by each parameter's own flag:
 | observables MLP | 0.75 | 0.51 | 0.20 | 0.29 |
 
 Reading:
-- **Mass is the headline result.** A linear probe on the trained model gets log_m R² 0.61. A linear probe on the stated numbers gets 0.02. So the model has computed a nonlinear function of the text (mass from dynamics) and stores it linearly, close to the nonlinear ceiling of 0.64.
+- **Mass is the headline result.** A linear probe on the trained model gets log_m R² 0.61. A linear probe on the stated numbers gets 0.02. So the model has computed a nonlinear function of the text (mass from dynamics) and stores it linearly. *("Close to the nonlinear ceiling of 0.64" was wrong: the real ceiling is about 0.80.)*
 - **Acceleration is not evidence of computation.** a is nearly linear in the stated values (Δv/Δt with a mostly fixed Δt), so the observables ridge already reaches 0.75. The trained MLP (0.85) is near the ceiling (0.88).
-- **mu is limited by the data, not the model.** Even the observables MLP reaches only 0.18. The trained model matches that ceiling.
-- **The identifiability gaps are a data property.** The log_m id > non-id gap and the reversed mu gap both appear in the observables ceiling too, so they come from the data, not from the model. Non-identifiable episodes still carry partial information (stiction bounds, the parameter range). The non-id subset is small (about 70 episodes).
+- ~~mu is limited by the data, not the model.~~ **Superseded:** the sklearn MLP was underfit. The GPU ceiling reaches mu ≥ 0.67, so the model is far below what the data allow.
+- The log_m id > non-id gap appears in the baseline too, so it comes from the data: non-identifiable episodes still carry partial information (stiction bounds, the parameter range). *(The reversed mu gap was an artifact of the weak sklearn baseline: with the GPU ceiling, mu is higher on identifiable episodes.)*
 - **Decision gate passed for mass:** the trained model clearly beats the linear observables baseline. Move on to more channels.
 
 ### Run 3: `nat` channel, 15k steps on RunPod (2026-10-02)
@@ -114,18 +189,18 @@ Best layer per target, with run 2 (`num`) in brackets:
 | trained MLP | 0.79 (0.92) | 0.84 (0.90) | 0.47 (0.85) | 0.60 (0.96) | 0.47 (0.62) | 0.09 (0.20) |
 | random-init ridge | 0.00 | 0.01 | 0.01 | 0.03 | 0.00 | 0.00 |
 | observables ridge | 1.00 | 1.00 | 0.75 | 1.00 | 0.02 | 0.03 |
-| observables MLP (ceiling) | 1.00 | 1.00 | 0.88 | 1.00 | 0.63 (0.64) | 0.18 |
+| observables MLP (sklearn, underfit) | 1.00 | 1.00 | 0.88 | 1.00 | 0.63 (0.64) | 0.18 |
 
 Late spans, log_m: trained ridge 0.43 on identifiable vs 0.24 on non-identifiable episodes (ceiling 0.74 vs 0.52).
 
 Reading:
-- **First cross-channel result: the information is still there, but the model extracts less of it.** The `nat` ceiling for log_m (0.63) matches `num` (0.64), so rounding to 0.1 removed almost no mass information. Yet the trained model's linear log_m drops from 0.61 to 0.39. This gap between information present and information extracted is exactly what the project measures.
+- **First cross-channel result: the information is still there, but the model extracts less of it.** The `nat` baseline for log_m (0.63) matches `num` (0.64), so rounding to 0.1 removed almost no mass information. (Confirmed later with the GPU ceiling: identical to 3 decimals.) Yet the trained model's linear log_m drops from 0.61 to 0.39. This gap between information present and information extracted is exactly what the project measures.
 - Mass is still computed: a linear probe gets 0.39 on the trained model vs 0.02 on the stated values.
 - Every variable decodes worse at the span-end token, including stated ones (x 0.37). Possible causes:
   - (a) Language makes extraction harder.
   - (b) The probe position: x and v sit at varying positions inside templated sentences, while in `num` they sit at fixed offsets.
   - (c) The compute budget: same steps and model size, but the model must also learn the templates, and loss was still falling slowly.
-  - (b) and (c) must be ruled out before claiming (a).
+  - (b) and (c) must be ruled out before claiming (a). *(Resolved: (b) was ruled out by mean pooling. (c) explains part of the gap. At equal training with 3 seeds, a real gap of about 0.1 remains.)*
 - Random-init is about 0 everywhere, unlike `num` (about 0.5 for x and v). In `num`, a fixed format makes position a proxy for time; in `nat`, variable-length sentences break that.
 
 ### Probe-position check: mean pooling over each span (2026-10-02, local)
@@ -138,7 +213,7 @@ Same checkpoints, with features averaged over the span's tokens instead of read 
 | `nat` (run 3) | 0.39 | 0.48 |
 
 Reading:
-- **Probe position does not explain the `nat` vs `num` gap.** Pooling raises both channels by a similar amount, and the gap stays at about 0.2.
+- **Probe position does not explain the `nat` vs `num` gap.** Pooling raises both channels by a similar amount, and the gap stays at about 0.2 (at 15k steps).
 - **The observables-MLP "ceiling" is not a ceiling.** With mean pooling, the `num` model beats it on log_m (0.67 vs 0.64) and on mu (0.34 vs 0.18). The sklearn MLP on about 26k rows is underfit. This corrects two earlier readings: "close to the nonlinear ceiling" (run 2) and "mu is limited by the data, not the model". A stronger reference is needed before any ceiling claim.
 - Mean pooling also lifts random-init (log_m 0.15 → 0.26 for `num`). Averaged random features act like a bag of characters, so the trained-vs-random comparison must use the same pooling.
 
@@ -201,7 +276,7 @@ Reading:
 Reading:
 - **Sanity check passed.** A char-level model from scratch does as well on ciphered `num` as on `num`.
 - **Run-to-run noise floor.** `sym` and `num` carry identical information, so their difference estimates seed-level variation: about 0.02 for log_m and up to 0.07 for mu (end pooling).
-- So the `nat` vs `num` gap on log_m (0.09–0.12) is well above noise. The mu gap (0.09–0.13) is only marginally above it and needs several seeds per channel before any claim.
+- So the `nat` vs `num` gap on log_m (0.09–0.12) is well above noise. The mu gap (0.09–0.13) was only marginally above it. *(Resolved by the 3-seed runs below.)*
 
 ### Run 7: `rel`, 45k steps on RunPod (2026-10-02): negative control
 
@@ -216,14 +291,7 @@ Same settings as runs 5–6. 2074 s. Validation loss plateaued at 0.0341 by step
 Reading:
 - **Negative control passed.** When the text carries little mass information, the model doesn't invent it: it stays below the `rel` ceiling (0.27). Compare `num`, where the trained probe (0.64) far exceeds the linear observables baseline (0.02).
 - Identifiable and non-identifiable episodes score about the same with `rel`, as expected.
-- **Fraction of the available mass information the model extracts** (mean-pooled linear probe ÷ ceiling): `num` 0.72/0.80 ≈ 0.90, `nat` 0.60/0.80 ≈ 0.75, `rel` 0.21/0.27 ≈ 0.79. This ratio is a candidate headline metric per channel. The ceilings are lower bounds, so the ratios are upper bounds.
-
-## Channel facts (`rel`, `sym`, added 2026-10-02)
-
-- `rel` states only comparisons with the previous sentence: faster/slower/about as fast, reversed direction, further left/right/about where it was, and push starts/stops/reverses/stronger/weaker. A push's direction appears only relative to the motion ("with/against its motion"). There are no numbers and **no times**. m and mu are not identifiable, but `rel` still carries partial information about them: a ridge on its stated codes gets log_m about 0.2 (400 episodes), probably because heavy carts get stuck more often. So the negative control is "trained probe ≤ `rel` ceiling", not "probe ≈ 0". Thresholds: `SAME_V = SAME_X = 0.05`.
-- `sym` is `num` under a fixed random character substitution, spaces included. It has the same spans and lengths as `num`. For a from-scratch char model it should match `num`, so it's a sanity check. It matters only for pretrained models.
-- Observables for `qual` and `rel` (`probe.code_observables`): each sentence is read with the channel's own parser into one-hot "key=value" codes (qual 23 codes, rel 24). Each row holds the latest value of every key, plus the per-sentence history, most recent first. A ridge on 400 episodes gives `qual` log_m 0.88 (the mass bin is stated) and F 0.96. `CEIL=""` skips the ceiling for smoke tests; `CEIL=5000,50000,200000` sets the sizes.
-- The `qual` and `rel` parsers now also return the motion direction, change word and start/stop event (`qual`), and the push-vs-motion relation plus the first sentence (`rel`, via `parse_rel_first`). All are checked in `_checks()`.
+- **Fraction of the available mass information the model extracts** (mean-pooled linear probe ÷ ceiling, seed 0): `num` 0.72/0.80 ≈ 0.90, `nat` 0.60/0.80 ≈ 0.75, `rel` 0.21/0.27 ≈ 0.79. This ratio is a candidate headline metric per channel. The ceilings are lower bounds, so the ratios are upper bounds. (`rel`'s ceiling is from 50k episodes, the others from 200k.)
 
 ### Seeds: `num` and `nat`, 3 seeds each at 45k steps (2026-10-02, RunPod)
 
@@ -240,7 +308,6 @@ Trained ridge, best layer, mean ± sd over 3 seeds:
 Reading:
 - **The `num` vs `nat` gap is real for both hidden parameters.** log_m loses about 0.09–0.13 and mu about 0.09–0.11 when the trajectory is told in words. Every gap is well beyond seed noise, except mean-pooled mu, which is weaker (t 2.6; mu is noisy under mean pooling, sd about 0.04).
 - Seed noise is about 0.01–0.02 for log_m and 0.01–0.05 for mu. This matches the `sym` estimate (run 6).
-- Supersedes the single-seed caveat in run 6 and in "Known issues".
 
 ### Run 8: `qual`, 45k steps on RunPod (2026-10-02)
 
@@ -273,7 +340,75 @@ Reading:
 - Still, a linear probe on the `num` representation extrapolates far better than a linear probe on the stated values (−0.45 vs −3.18). The mass direction is roughly linear somewhat beyond the training range. `nat` is weaker (−0.93).
 - Moving-span loss degrades 10–14% on unseen masses for `num`/`nat`/`sym`/`rel`, and 36% for `qual`, whose "heavy" bin covers everything above 2.5. This doesn't yet separate extrapolation failure from intrinsically harder dynamics: that needs a reference model trained on m up to 8.
 
-## Dataset splits (built 2026-10-02, not yet trained)
+### Interchange interventions on mass: `num` 45k (2026-10-03, RunPod)
+
+Logs (local, gitignored): `das_num45k.log` (k=1, all positions), `das_k1_last.log`, `das_k1_all_invm.log`, `das_k8_last.log`, `das_k8_last_end.log`, `das_k8_last_bid.log`, `das_k8_last_fc.log`, `das_k8_span.log`, `das_k8_all.log`, `das_k32_all.log`. 400 test pairs; median |v_cf − v_A| at r1 is about 0.51. The clean model decodes v at r1 with median error 0.005 on generic pairs and 0.084 at force changes, closer to v_A than to v_cf in about 70–87% of pairs. So it uses mass information behaviourally.
+
+**1. The ridge log_m probe direction is causally inert.** Patching along it does nothing beyond a random direction of the same norm: src slope 0.00 at every layer, and ×1–×100 dose-response is no better than random. The probe direction is decodable but not used. DAS directions have |cos| ≤ 0.13 with it.
+
+**2. No 1-D variable carries mass.** At k = 1 (all positions or `last`), DAS from B's activations has src slope about 0 at every layer, the same as `das-shuf`. Its IIA gain (0.13 → about 0.3) equals `ablate`: it comes from erasing A's mass, not from transferring B's. Writing the true log m or 1/m at k = 1 also gives nothing (best src slope 0.16).
+
+**3. An 8-D write channel that the model reads as mass** (`das-steer`, k = 8, `pos=last`):
+
+| | L3 | L4 | L5 | L6 |
+|---|---|---|---|---|
+| src slope / r, all test pairs | 0.41 / 0.62 | 0.62 / 0.64 | 0.58 / 0.77 | 0.01 / 0.02 |
+| src slope / r, m_B held out of DAS training | 0.35 / 0.65 | 0.66 / 0.88 | 0.54 / 0.85 | |
+| effect (median) / iia | 0.43 / 0.50 | 0.60 / 0.61 | 0.33 / 0.44 | 0 / 0.20 |
+| target CE, source B / B′ (clean 1.116) | 0.373 / 0.418 | 0.348 / 0.437 | 0.357 / 0.417 | |
+
+It replicates with other pair sets (`BID=1`: L4 slope 0.59, r 0.70; held-out masses r 0.88). The code c depends only on m_B, but the counterfactual change depends on F's sign and size. So the model must combine the written value with F downstream: the subspace feeds its a = F/m computation. It interpolates to B masses never used in training (r 0.85–0.88).
+
+**4. But the natural value doesn't transfer.**
+- DAS from B's own activations finds nearly the same subspace (overlap with the steer subspace 0.94–0.96), yet src slope is only 0.00–0.15 at L3–L5.
+- No B source choice helps:
+  - mean over B's last span up to r0, or its last token (`SRC=end`);
+  - B's prefix required to identify m_B (`BID=1`);
+  - B's own last force-change span, the same situation as A (`BSRC=fc`).
+- Diagnostic at L4 (a one-off script, not kept):
+  - Natural activations in the subspace do carry mass: log m R² 0.41 (A's last span) and 0.48 (B's source span), vs 0.70–0.73 from all 256 dims.
+  - But the learned steer code lies far off-manifold: its mean is 4.9 natural spreads from the natural mean, with up to 5× the natural per-dim spread.
+- Reading: with `pos=last`, every earlier position still holds A's own mass at layer L and below, and later tokens attend to them. A natural-scale swap from B can't override this redundant copy; a 5× write can. The test is patching at all positions with k = 8 / 32 (below).
+
+**5. The written value reaches predictions through attention.** With `pos=span` (only A's last prompt span patched; generated tokens untouched), `das-steer` still works: L4 slope 0.45, r 0.72; L5 slope 0.40, r 0.69; held-out masses r 0.75–0.85. The read side is still null there.
+
+**6. Real interchange appears once every position and a wider subspace are patched** (`pos=all`, L4):
+
+| L4, pos=all | k = 8 | k = 32 |
+|---|---|---|
+| `das` src slope / r | 0.19 / 0.26 | **0.31 / 0.53** |
+| `das-shuf` src slope / r | 0.07 / 0.13 | 0.10 / 0.18 |
+| `das` target CE, source B / B′ | 0.369 / 0.378 | 0.362 / 0.383 |
+| `das-steer` src slope / r, effect, iia | 0.69 / 0.69, 0.63, 0.65 | 0.74 / 0.70, 0.83, 0.78 |
+
+- L2–L3 stay near 0 (k = 32 L3: 0.18 / 0.27). L5 is weaker than L4 (k = 32: 0.13 / 0.34).
+
+Seeds and width at L4, pos=all (logs `das_k32_all_L4_s{1,2}.log`, `das_k64_all_L4.log`). CE gap = target CE with source B′ minus with source B (source information actually used; 0 for any source-independent patch):
+
+| | `das` src slope / r | `das` CE gap | `das-shuf` CE gap | `das-steer` CE gap |
+|---|---|---|---|---|
+| seed 0, k = 32 | 0.31 / 0.53 | 0.021 | 0.003 | 0.174 |
+| seed 1, k = 32 | 0.11 / 0.30 | 0.008 | 0.000 | 0.101 |
+| seed 2, k = 32 | 0.50 / 0.11 | 0.008 | 0.000 | 0.147 |
+| seed 0, k = 64 | 0.39 / 0.54 | 0.036 | 0.008 | 0.196 |
+
+- The read effect is positive in every seed and beats the shuffled control, but it is small and varies between seeds.
+- The seed-2 slope is driven by a few outliers (r 0.11). The slope through 0 is outlier-sensitive, so read r and the CE gap first. A robust slope (Theil–Sen) would be better.
+- Wider subspaces read more (k = 64 > 32 > 8), consistent with a distributed code.
+- A random 64-D overwrite breaks decoding (only 87/400 parse).
+- Held-out-mass rows (65 pairs) are noisy: `das-shuf` reaches 0.47 / 0.55 there at k = 32. Use the all-pairs row.
+
+Reading:
+- **The model carries mass in a distributed, redundant form,** spread over many dimensions and over every earlier position. No 1-D variable carries it, and the probe direction is not the causal one.
+- **A real interchange from the model's own activations** (k = 32, every position, L4) transfers about a third of B's effect (slope 0.31, r 0.53), well above the shuffled control.
+- **Writing the true value** into the same subspace transfers about 0.7. Part of that gap is the off-manifold amplitude the steer is free to use.
+- **The operator reads the variable:** the effect depends on F per pair and interpolates to unseen mass values.
+- **Caveats:**
+  - Read effect replicated on 3 seeds in sign only (see the seeds table).
+  - DAS can find directions with any model. The shuffled-source control and the source-difference metric guard against that, but a random-init-model control is not run.
+  - The held-out mass band is a narrow interpolation test (m_B in [2, 3]), not the `ood-combo` separation of lookup from computation that decision 1 asks for.
+
+## Dataset splits (built 2026-10-02)
 
 `sim.SPLITS`, `sim.split_episodes(split, part, n, start_seed)`; `python train.py <ch> <n> <steps> <seed> <split>` trains on the train part only; `python probe.py <ckpt> <n> <pool> <split>` fits probes on the train part and scores them on the test part, and prints next-token loss on both parts.
 
@@ -285,24 +420,27 @@ Reading:
 | `compose` | mu = 0, or F = 0 throughout (50/50) | mu > 0 and some F ≠ 0 | 100% / 100% | 83% (train part: 51%) |
 
 - Scores on OOD splits are **1 − MSE / Var_train** (targets standardized with the train part's stats), not R². Plain R² on a narrow test region such as m in [3, 5] divides by that region's small variance and goes to −30 even for decent predictions. 1 means perfect; 0 means an error as large as the training spread. Predicting the train mean scores below 0 on a shifted region.
-- `ood-extrap` needs no retraining: existing iid models already never saw m > 5. `ood-combo` and `compose` need models trained on their train part.
+- `ood-extrap` needs no retraining: existing iid models never saw m > 5 (done; see Results). `ood-combo` and `compose` need models trained on their train part (not run yet).
 - Not built: the `cross-channel` split. It needs mixed-channel training in `train.py`, and probes fit on one channel and scored on another.
 
 ## Known issues and open questions
 
-- Only `num` and `nat` have 3 seeds. `sym`, `rel` and `qual` have one seed each (seed noise: log_m about 0.02, mu up to 0.05).
-
-- The observables MLP (sklearn) is underfit. Use the `ceiling` rows instead. The mu ceiling has not saturated even at 200k episodes.
-- `qual` still needs a binned observables baseline in `probe.py` (`STATED_DIGITS` covers only `num` and `nat`). The block-size overflow is fixed.
-
-- `qual` repeats "It stays still." during long stuck stretches. This inflates token counts (the length confound). It could be collapsed into one sentence.
-- `qual` reports "a gentle push starts" when the force changes within the same bin. This is intended information loss, but worth noting in the paper.
+- Only `num` and `nat` have 3 seeds. `sym`, `rel` and `qual` have one seed each.
+- The mu ceiling has not saturated even at 200k episodes (0.28 → 0.57 → 0.67). A closed-form or least-squares mu estimator from the stated trajectory would give a firmer reference.
+- Moving-span loss on unseen masses rises 10–14%, but without a reference model trained on m up to 8, this can't be separated from intrinsically harder dynamics. That needs a new wide-mass training option (not built).
+- `qual` repeats "It stays still." during long stuck stretches, which inflates token counts (a length confound). `qual` also reports "a gentle push starts" when the force changes within the same bin (intended information loss; note it in the paper).
+- `rel` validation loss plateaus by 15k steps and rises slightly by 45k (mild overfitting).
 - The citations in `project_idea.md` must be verified, especially arXiv 2607.27017, Paperlayer 2607.20058, and the PhysLang characterization.
-- Related work missing from `project_idea.md`: Vafa et al. 2025 ("What has a foundation model found?", inductive-bias probe on orbital mechanics; the closest prior work), Vafa et al. 2024 (world-model evaluation metrics), Li, Nye, Andreas 2021 (implicit entity state in text), and Othello-GPT.
+- Related work missing from `project_idea.md`: Vafa et al. 2025 ("What has a foundation model found?", an inductive-bias probe on orbital mechanics; the closest prior work), Vafa et al. 2024 (world-model evaluation metrics), Li, Nye, Andreas 2021 (implicit entity state in text), and Othello-GPT.
+- Interventions:
+  - The DAS read effect (k = 32, L4) is small and varies between seeds (CE gap 0.008–0.021, r 0.11–0.53). The `src slope` through 0 is outlier-sensitive; switch to a robust estimator.
+  - `das-steer` at k = 8 failed to train once (`BSRC=fc`, L4: loss above `das`), so check training losses before reading a row.
+  - Greedy decoding of `num` sometimes emits an unexpected step; about 5–10% of pairs are dropped per condition.
 
 ## Not built yet
 
-- Verbalizers: the ablations `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
-- Dataset split `cross-channel` (the others are built).
-- The interchange intervention code.
+- Interventions beyond the first pass: a random-init-model DAS control, interventions on `nat` and on an `ood-combo` model (lookup vs computation), mu and F as intervention targets.
+- Training on `ood-combo` and `compose`, and a wide-mass reference model for `ood-extrap`.
+- The `cross-channel` split (mixed-channel training, with probes fit on one channel and scored on another).
+- The `nat` ablations: `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
 - Phase 2: collisions.
