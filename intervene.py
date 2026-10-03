@@ -22,17 +22,23 @@ Intervention at layer L along a unit direction u, at every position: overwrite A
 Scored on held-out pairs by greedy decoding the next span:
   effect = (v_patched - v_clean) / (v_cf - v_A) at step r1, median   (1 = the simulator's full mass effect)
   iia    = share of pairs whose decoded v is closer to v_cf than to v_A (the clean model gives the floor)
-  src    = slope (through 0) and correlation of v_patched(B) - v_patched(B') against v_cf(B) - v_cf(B'), with B' a
+  src    = Theil-Sen slope and correlation of v_patched(B) - v_patched(B') against v_cf(B) - v_cf(B'), with B' a
            second source for the same A. Erasing A's mass moves v toward the average mass, which already looks like a
            partial effect toward a random B; src is 0 for any source-independent change. Ideal slope 1.
+  CE gap = target CE with source B' minus with source B (teacher-forced): the source information actually used.
 DAS training pairs exclude B masses in HOLD; test rows split by whether m_B is in HOLD.
+Env COMBO=1 (for a model trained on the ood-combo split): A and B are both ood-combo train-part episodes, and a pair
+is held out when the counterfactual is an unseen combination (m_B in [3, 5] and |F| >= 7 at r0). DAS trains on the
+other pairs only; the test set is half held-out pairs, half others.
+Env RANDOM=1: use a random-init model with the checkpoint's shapes (control; it can't decode, so read the CE gap).
 """
 import math, os, random, sys
 import numpy as np, torch, torch.nn.functional as F
+from scipy.stats import theilslopes
 from sklearn.linear_model import RidgeCV
 import sim
 from probe import PROBE_SEED, residuals, targets
-from train import BOS, PAD, load
+from train import BOS, GPT, PAD, load
 
 PAIR_SEED = 50_000_000
 LOG_M = 4  # column of probe.targets
@@ -43,6 +49,8 @@ SRC = os.environ.get("SRC", "mean")  # source activation: mean over B's last spa
 LAYERS = [int(x) for x in os.environ.get("LAYERS", "1,2,3,4,5,6").split(",")]
 BID = os.environ.get("BID") == "1"  # keep only pairs whose B prefix (up to r0) identifies m_B
 BSRC = os.environ.get("BSRC", "last")  # B's source span: its last span up to r0, or (fc) its last force-change span
+COMBO = os.environ.get("COMBO") == "1"
+RANDOM = os.environ.get("RANDOM") == "1"
 
 
 def probe_dirs(model, stoi, n):
@@ -56,12 +64,17 @@ def probe_dirs(model, stoi, n):
     return out
 
 
-def make_pairs(n):
+def make_pairs(done):
+    """done(pairs) -> bool: stop condition, or an int n (stop at n pairs)."""
+    if isinstance(done, int):
+        n, done = done, lambda ps: len(ps) == n
     rng, pairs = random.Random(0), []
     for seed in range(PAIR_SEED, 10 ** 9, 2):
-        if len(pairs) == n:
+        if done(pairs):
             return pairs
         A, B = sim.make_episode(seed), sim.make_episode(seed + 1)
+        if COMBO and (sim.in_combo(A["params"]) or sim.in_combo(B["params"])):
+            continue  # both must be ood-combo train-part episodes
         spans, cand = A["texts"]["num"]["spans"], []
         for i, (_, s1, r0) in enumerate(spans[:-1]):
             if r0 < 10 or "force_change" not in A["traj"]["events"][r0] or A["traj"]["F"][r0] == 0:
@@ -87,7 +100,8 @@ def make_pairs(n):
                     continue  # B's own text up to r0 doesn't determine its mass, so B's activations can't carry it
                 b0, b1, _ = [s for s in B["texts"]["num"]["spans"] if s[2] <= p["r0"]][-1]
             pairs.append(dict(p, seed=seed, A_start=spans[[s[2] for s in spans].index(p["r0"])][0] + 1, A=A["texts"]["num"]["text"][:p["cut"]], B=B["texts"]["num"]["text"][:b1 + 1],
-                              B_span=(b0, b1), mA=A["params"]["m"], mB=B["params"]["m"], tr1=A["traj"]["t"][p["r1"]]))
+                              B_span=(b0, b1), mA=A["params"]["m"], mB=B["params"]["m"], tr1=A["traj"]["t"][p["r1"]],
+                              combo=3 <= B["params"]["m"] <= 5 and abs(A["traj"]["F"][p["r0"]]) >= 7))
 
 
 def v_cf(p, m):
@@ -209,7 +223,7 @@ def report(name, v, v2, v_clean, pairs, vcf2, hold, extra=""):
     """v, v2: decoded v with source B and with the second source B' (v2 None: source-independent condition)"""
     vA, vcf = np.array([p["vA"] for p in pairs]), np.array([p["vcf"] for p in pairs])
     cells = []
-    for tag, m in (("all", np.ones(len(pairs), bool)), ("m_B held out", hold), ("m_B seen", ~hold)):
+    for tag, m in (("all", np.ones(len(pairs), bool)), ("held out", hold), ("seen", ~hold)):
         ok = m & ~np.isnan(v) & ~np.isnan(v_clean)
         eff = (v[ok] - v_clean[ok]) / (vcf[ok] - vA[ok])
         iia = np.mean(np.abs(v[ok] - vcf[ok]) < np.abs(v[ok] - vA[ok]))
@@ -217,7 +231,8 @@ def report(name, v, v2, v_clean, pairs, vcf2, hold, extra=""):
         if v2 is not None:
             ok2 = ok & ~np.isnan(v2) & ~np.isnan(vcf2)
             dp, dc = v[ok2] - v2[ok2], vcf[ok2] - vcf2[ok2]
-            cell += f" src slope {dp @ dc / (dc @ dc):5.2f} r {np.corrcoef(dp, dc)[0, 1]:5.2f}"
+            if len(dp) >= 5 and dc.std() > 0:
+                cell += f" src slope {theilslopes(dp, dc)[0]:5.2f} r {np.corrcoef(dp, dc)[0, 1]:5.2f}"
         cells.append(cell)
     print(f"  {name:9s} " + " | ".join(cells) + extra, flush=True)
 
@@ -228,14 +243,24 @@ def main():
     k, pos = int(k or 1), pos or "all"
     assert pos in ("all", "last", "span")
     model, stoi, ck = load(path)
+    if RANDOM:
+        torch.manual_seed(1)
+        model = GPT(**ck["cfg"]).cuda().eval()
     assert ck["channel"] == "num"
     for q in model.parameters():
         q.requires_grad_(False)
     itos = {i: c for c, i in stoi.items()}
-    pairs = make_pairs(n_train + n_test)
-    train = [p for p in pairs[:n_train] if not HOLD[0] <= p["mB"] <= HOLD[1]]
-    test = pairs[n_train:]
-    hold = np.array([HOLD[0] <= p["mB"] <= HOLD[1] for p in test])
+    if COMBO:
+        pairs = make_pairs(lambda ps: sum(p["combo"] for p in ps) >= n_test // 2
+                           and sum(not p["combo"] for p in ps) >= n_train + n_test // 2)
+        held, seen = [p for p in pairs if p["combo"]], [p for p in pairs if not p["combo"]]
+        train, test = seen[:n_train], held[:n_test // 2] + seen[n_train:n_train + n_test // 2]
+        hold = np.array([p["combo"] for p in test])
+    else:
+        pairs = make_pairs(n_train + n_test)
+        train = [p for p in pairs[:n_train] if not HOLD[0] <= p["mB"] <= HOLD[1]]
+        test = pairs[n_train:]
+        hold = np.array([HOLD[0] <= p["mB"] <= HOLD[1] for p in test])
     enc = lambda t: [stoi[c] for c in t]
     ids = [[BOS] + enc(p["A"]) + enc(p["target"]) for p in train]
     n_prompt = [1 + len(p["A"]) for p in train]
@@ -252,9 +277,11 @@ def main():
     pA = [[BOS] + enc(p["A"]) for p in test]
     ids_test, np_test = [a + enc(p["target"]) for a, p in zip(pA, test)], [len(a) for a in pA]
     ce = lambda L, u, c: f" || target CE {test_ce(model, ids_test, np_test, (L, u, c, start_test)):.3f}"
-    ces = lambda L, u, c: ce(L, u, c) + f", source B' {test_ce(model, ids_test, np_test, (L, u, c[second], start_test)):.3f}"
+    def ces(L, u, c):
+        a, b = (test_ce(model, ids_test, np_test, (L, u, cc, start_test)) for cc in (c, c[second]))
+        return f" || target CE {a:.3f}, source B' {b:.3f}, gap {b - a:+.3f}"
     v_clean = decoded_v(decode(model, pA, itos), test)
-    print(f"{path}: k={k}, pos={pos}, src={SRC}, bid={BID}, bsrc={BSRC}, steer={os.environ.get('STEER', 'logm')}, {len(train)} DAS train pairs, {len(test)} test pairs ({hold.sum()} with m_B in {HOLD}), "
+    print(f"{path}: k={k}, pos={pos}, src={SRC}, bid={BID}, bsrc={BSRC}, combo={COMBO}, random={RANDOM}, steer={os.environ.get('STEER', 'logm')}, {len(train)} DAS train pairs, {len(test)} test pairs ({hold.sum()} held out: {"combo region" if COMBO else f"m_B in {HOLD}"}), "
           f"median |v_cf - v_A| {np.median([abs(p['vcf'] - p['vA']) for p in test]):.3f}")
     report("clean", v_clean, None, v_clean, test, vcf2, hold, f" || target CE {test_ce(model, ids_test, np_test):.3f}")
     run = lambda L, u, c: decoded_v(decode(model, pA, itos, L, u, c, start_test), test)
