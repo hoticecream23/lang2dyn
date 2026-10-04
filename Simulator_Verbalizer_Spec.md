@@ -174,7 +174,7 @@ They are used for the `qual`/`rel` observables baselines, and later for generati
 2. ✅ `num`, `nat`, `qual`, `rel`, `sym` verbalizers with parsers and round-trip checks.
 3. ✅ Training on each channel; probes with baselines and ceiling; 3 seeds for `num` and `nat`.
 4. ✅ Dataset splits; `ood-extrap` evaluated with the existing models.
-5. ⬜ Training on `ood-combo` / `compose`; a wide-mass reference model.
-6. 🟨 Interchange interventions on counterfactual pairs: `intervene.py` (`num` only; probe directions, DAS, steering, controls).
+5. 🟨 Training on `ood-combo` (done, `num` seed 0) / `compose` (not run); a wide-mass reference model (not built).
+6. 🟨 Interchange interventions on counterfactual pairs: `intervene.py` (`num` only; probe directions, DAS, steering, shuffled / random-init controls, `ood-combo` lookup-vs-computation pairs). Not yet: `nat`, mu / F targets.
 7. ⬜ `nat` ablations, `cross-channel` split.
 8. ⬜ Phase 2 (collisions).

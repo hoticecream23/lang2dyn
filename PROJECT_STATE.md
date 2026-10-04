@@ -405,7 +405,7 @@ Reading:
 - **Caveats:**
   - Read effect replicated on 3 seeds in sign only (see the seeds table).
   - DAS can find directions with any model. The shuffled-source control and the source-difference metric guard against that, but a random-init-model control is not run.
-  - The held-out mass band is a narrow interpolation test (m_B in [2, 3]), not the `ood-combo` separation of lookup from computation that decision 1 asks for.
+  - The held-out mass band is a narrow interpolation test (m_B in [2, 3]), not the `ood-combo` separation of lookup from computation that decision 1 asks for (done in round 2, below).
 
 ### Interventions, round 2: robustness and lookup vs computation (2026-10-03, RunPod)
 
