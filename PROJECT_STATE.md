@@ -44,7 +44,8 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
 | `intervene.py` | Interchange interventions on mass or friction (`num` and `nat`): counterfactual pairs (iid / `ood-combo` / `compose` designs), DAS / steering / probe / random directions, greedy-decode and CE scoring with CIs | working |
 | `requirements.txt` | torch ≥ 2.6, numpy, scikit-learn, psutil | |
 | `HANDOFF.md` | How to resume in a new chat | |
-| `writeup_interventions.md` | Draft write-up of the intervention results (R1–R6), with figure specs | draft |
+| `writeup_interventions.md` | Draft write-up of the intervention results (R1–R6) | draft |
+| `make_figures.py` | Makes the write-up figures (`figures/*.pdf`, `*.png`) from the intervention logs (needs the local logs) | working |
 | `ckpt/*.pt`, `*.log` | Checkpoints and logs (gitignored, local only). Each results section names its files | |
 
 ## Decisions made
@@ -550,7 +551,7 @@ Effect and IIA on the seen arm are uninformative: A has mu = 0, so any friction,
 - Held-out-arm slopes: iid 0.49 / 0.73; `compose` seed 0 0.32 / 0.49; seed 1 0.28 / 0.17.
 - `das` (read) CE gaps are +0.008 to +0.013 for all three models; slopes are about 0.
 
-`compose` seed-1 behaviour (`probe_num_compose_s1_mean.log`): moving-span loss 0.218 on the train part vs **0.670** on the test part (3.1×); stuck 0.006 vs 0.926. This replicates seed 0 (3.7×; stuck 0.006 → 1.08).
+`compose` seed-1 behaviour (`probe_num_compose_s1_mean.log`): moving-span loss 0.218 on the train part vs **0.670** on the test part (3.1×); stuck 0.006 vs 0.926. This replicates seed 0 (3.7×; stuck 0.006 → 1.08). Reference: the iid model (`num_45k`) scores moving 0.264 on both `compose` parts (stuck 0.013 / 0.044; 300 episodes per part, CPU, 2026-10-04), so the test part is not intrinsically harder.
 
 Reading:
 - **Composition is partial.** The `compose` models' force dynamics do respond to a written friction value, but only at about 0.3–0.7× the iid model's strength (slope 0.24–0.56 vs 0.65–0.78), and less consistently across layers.
@@ -571,6 +572,17 @@ Reading:
 - Scores on OOD splits are **1 − MSE / Var_train** (targets standardized with the train part's stats), not R². Plain R² on a narrow test region such as m in [3, 5] divides by that region's small variance and goes to −30 even for decent predictions. 1 means perfect; 0 means an error as large as the training spread. Predicting the train mean scores below 0 on a shifted region.
 - `ood-extrap` needs no retraining: existing iid models never saw m > 5 (done; see Results). `ood-combo` is trained on 2 seeds (`ckpt/num_ood-combo.pt`, `ckpt/num_ood-combo_s1.pt`) and `compose` on 2 (`ckpt/num_compose.pt`, `ckpt/num_compose_s1.pt`); see "Interventions, rounds 2–4".
 - Not built: the `cross-channel` split. It needs mixed-channel training in `train.py`, and probes fit on one channel and scored on another.
+
+## Paper readiness (assessment, 2026-10-04)
+
+- **Workshop-ready now**, e.g. interpretability or world-model workshops: a controlled setup, causal tests with careful controls, several seeds and CIs, and clear findings (probe ≠ causal; a write channel; computation vs lookup; weak composition).
+- **For a main-conference paper, the main gaps are:**
+  1. Scale: 5M-parameter char models on a 1-D cart. Show the effects on larger models, or a pretrained model fine-tuned on the same text.
+  2. The strongest effect is a *write*, at about 5× natural amplitude (off-manifold). An amplitude-limited write, or a stronger natural interchange, would make the causal claim harder to dismiss.
+  3. An explanation of why the natural read fails (redundancy across positions is a hypothesis, not yet shown).
+  4. Breadth: a second dynamics domain or phase 2 (collisions), and `nat` for `ood-combo` / `compose`.
+  5. Related work: verify the citations in `project_idea.md`, and position against probing critiques (amnesic probing, Ravichander et al.), Othello-GPT, Vafa et al. 2025, and DAS / causal abstraction.
+- **Possible methodological contribution:** the source-difference metrics. IIA and effect are inflated by regression to the mean when the patched value is erased (seen here: ablation alone reaches IIA 0.3–0.9).
 
 ## Known issues and open questions
 

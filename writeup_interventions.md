@@ -67,7 +67,7 @@ Erasing A's value already moves predictions toward a random B (regression to the
 On real held-out-combination episodes, the `ood-combo` model's moving-span loss is 4% above the iid model's (0.272 vs 0.262).
 
 **R6. Weak compositional reuse.** `num` models (2 seeds) are trained on frictionless episodes with forces plus friction-only coasting episodes (`compose`), and tested on friction and force together.
-- **Behaviour fails on both seeds.** Moving-span loss is 3.7× / 3.1× the training level (0.765 vs 0.209; 0.670 vs 0.218). Stuck-span loss rises from 0.006 to 1.08 / 0.93: the models never saw stiction holding a cart against a force.
+- **Behaviour fails on both seeds.** Moving-span loss is 3.7× / 3.1× the training level (0.765 vs 0.209; 0.670 vs 0.218). The iid model scores 0.264 on both parts, so the test episodes are not intrinsically harder. Stuck-span loss rises from 0.006 to 1.08 / 0.93: the models never saw stiction holding a cart against a force.
 - **Mass write:** it still works there (0.82), but that tests only the trained F/m pathway, since μ cancels in the mass counterfactual.
 - **Friction write:** writing friction under a force is the untrained combination. Source slope [95% CI]:
 
@@ -92,10 +92,12 @@ Next-token prediction on trajectory text yields an internal dynamics computation
 - **DAS can find directions in any network.** The shuffled-source and random-init controls guard against this here.
 - **Related work** (to verify before citing): Vafa et al. 2025 on inductive-bias probes of orbital mechanics; Othello-GPT; Li, Nye, Andreas 2021; Geiger et al. on DAS / causal abstraction.
 
-## 5. Figures (to make)
+## 5. Figures
 
-1. **Schematic of the pair construction:** A's prompt, the switch at r0, the decoded span, B and B′.
-2. **Source slope by layer** for interchange vs write vs controls (k = 32, seeds 0–2, with CIs).
-3. **Write vs read across conditions**, as a dot plot of source slope with CIs: `num` mass ×3 seeds, `nat` mass, friction.
-4. **`ood-combo`:** effect and IIA, held-out vs seen, for the two seeds and the iid model, with ablation as baseline.
-5. **`compose`:** moving and stuck loss, train vs test part, for the `compose` (2 seeds) and iid models; and the friction-write source slope by layer for the same three models.
+Made by `python make_figures.py` from the intervention logs (local) into `figures/` (PDF and PNG).
+
+1. `figures/fig1_pair.png`: an example counterfactual pair. A's velocity, the force change at r0, the simulator's target (A with 3 kg from r0), and the step the model decodes.
+2. `figures/fig2_write_vs_read.png`: write vs read vs shuffled control, for 3 `num` seeds (mass), `nat` (mass) and friction. Left: source slope (Theil–Sen 95% CI). Right: CE gap (bootstrap 95% CI). (R3, R4.)
+3. `figures/fig3_layers.png`: write slope by layer (L3–L5) for `nat` mass and `num` friction; the read is about 0 at every layer.
+4. `figures/fig4_combo.png`: `ood-combo`. Write effect on held-out vs seen pairs for 2 seeds and the iid model, with ablation as baseline. (R5.)
+5. `figures/fig5_compose.png`: `compose`. Left: moving-span loss on the train vs test part for the iid model and both `compose` seeds. Right: friction-write source slope at L4 / L5. (R6.)

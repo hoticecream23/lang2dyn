@@ -47,7 +47,7 @@ Read this file first in a new chat, then `PROJECT_STATE.md` (start with "Headlin
 
 ## Next steps, in order
 
-1. **Finish the write-up:** `writeup_interventions.md` (draft, results R1–R6). Make the 5 figures from `out/*.npz` and the logs, and verify the related-work citations.
+1. **Finish the write-up:** `writeup_interventions.md` (draft, results R1–R6). The figures are made (`python make_figures.py` -> `figures/`). Next: verify the related-work citations, and decide on a venue (see "Paper readiness" in `PROJECT_STATE.md`).
 2. **Why is the read weak?** Swapping in natural activations transfers little, though writing works. Options:
    - Patch several layers at once.
    - Source from B at matched token roles (`num` fields) rather than a span mean.
