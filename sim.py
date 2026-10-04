@@ -56,6 +56,8 @@ def simulate(p):
     for r in range(STEPS):
         if p.get("m_switch") and r == p["m_switch"][0]:
             m = p["m_switch"][1]  # mass changes at step r: state x, v at r is still the old mass's
+        if p.get("mu_switch") and r == p["mu_switch"][0]:
+            mu = p["mu_switch"][1]
         F = [f for s, f in segs if s <= r][-1]
         a = accel(F, v, m, mu)
         reg = "moving" if v or a else "stuck"
@@ -532,6 +534,8 @@ def _checks():
 
     # counterfactual twin differs only in the overridden param
     a, s = make_episode(7), make_episode(7, m_switch=[25, 4.0])  # mid-episode mass switch: identical up to step 25
+    assert a["traj"]["x"][:26] == s["traj"]["x"][:26] and a["traj"]["x"][26:] != s["traj"]["x"][26:]
+    s = make_episode(7, mu_switch=[25, 0.0])
     assert a["traj"]["x"][:26] == s["traj"]["x"][:26] and a["traj"]["x"][26:] != s["traj"]["x"][26:]
     a, b = make_episode(7), make_episode(7, m=4.0)
     assert {k for k in a["params"] if a["params"][k] != b["params"][k]} <= {"m"} and b["cf_of"] == a["id"]

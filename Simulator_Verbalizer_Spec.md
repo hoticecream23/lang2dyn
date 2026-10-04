@@ -132,7 +132,7 @@ OOD scores are 1 − MSE/Var_train. Model behavior is judged by next-token loss 
 
 `make_episode(seed, m=…)` (or `mu=…`, `F_segments=…`) regenerates an episode with one change and the same seed. Such whole-episode twins differ from t = 0, so their texts don't share a prefix.
 
-`make_episode(seed, m_switch=[r0, m])` changes the mass at recorded step r0: the state at r0 is unchanged, and the dynamics from r0 on use the new mass. Its text is identical to the original up to step r0. These are the targets for interchange interventions (`intervene.py`): patch a mass representation from episode B into episode A's prefix (up to r0), let the model continue, and compare with the simulator's A-with-B's-mass.
+`make_episode(seed, m_switch=[r0, m])` (or `mu_switch=[r0, mu]`) changes the mass (friction) at recorded step r0: the state at r0 is unchanged, and the dynamics from r0 on use the new mass. Its text is identical to the original up to step r0. These are the targets for interchange interventions (`intervene.py`): patch a mass representation from episode B into episode A's prefix (up to r0), let the model continue, and compare with the simulator's A-with-B's-mass.
 
 ---
 
@@ -174,7 +174,7 @@ They are used for the `qual`/`rel` observables baselines, and later for generati
 2. ✅ `num`, `nat`, `qual`, `rel`, `sym` verbalizers with parsers and round-trip checks.
 3. ✅ Training on each channel; probes with baselines and ceiling; 3 seeds for `num` and `nat`.
 4. ✅ Dataset splits; `ood-extrap` evaluated with the existing models.
-5. 🟨 Training on `ood-combo` (done, `num` seed 0) / `compose` (not run); a wide-mass reference model (not built).
-6. 🟨 Interchange interventions on counterfactual pairs: `intervene.py` (`num` only; probe directions, DAS, steering, shuffled / random-init controls, `ood-combo` lookup-vs-computation pairs). Not yet: `nat`, mu / F targets.
+5. 🟨 Training on `ood-combo` (`num`, seeds 0–1) and `compose` (`num`, seed 0) done; a wide-mass reference model (not built).
+6. ✅ Interchange interventions on counterfactual pairs: `intervene.py` (`num` and `nat`; mass and friction via `m_switch` / `mu_switch`; probe directions, DAS, steering; shuffled / random-init controls; iid / `ood-combo` / `compose` pair designs; bootstrap and Theil–Sen CIs). F is not a target (it is stated).
 7. ⬜ `nat` ablations, `cross-channel` split.
 8. ⬜ Phase 2 (collisions).

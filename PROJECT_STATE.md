@@ -1,6 +1,6 @@
 # Project State
 
-Last updated: 2026-10-03
+Last updated: 2026-10-04
 
 ## Research question
 
@@ -17,12 +17,20 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
 3. **Models stay below the ceiling, mu most of all.** Ceiling (GPU MLP on the stated values, 200k episodes): log_m 0.80, mu ≥ 0.67, not saturated. Models reach mu of about 0.3–0.4.
 4. **Controls pass.** `sym` (ciphered `num`) matches `num` within seed noise. `rel` (comparisons only) stays below its own ceiling (log_m 0.21 vs 0.27): no information is invented.
 5. **Generalization (first look).** On unseen masses (5–8), next-token loss on moving spans rises 10–14% (`qual`: 36%). Probes fit on m ≤ 5 fail to extrapolate for every decoder, so probes are the wrong tool there.
-6. **Interventions (`num`; 3 seeds, 1000 test pairs; random-init control).**
+6. **Interventions (`num` and `nat`; mass and friction; 3 seeds; CIs; random-init control).**
    - The log_m probe direction is causally inert, and no 1-D mass variable exists.
-   - **Write:** writing the true log m into a 32-D subspace at layer 4 makes the model produce the counterfactual, F-dependent velocities. Robust slope 0.67–0.91 on 3 seeds; CE gap 0.10–0.17 vs 0.001 on a random-init model. The model's dynamics computation reads a mass variable from this subspace.
-   - **Read:** swapping in another episode's own activations transfers little. CE gap 0.006–0.019, above the shuffled and random-init controls (≤ 0.003) on every seed. The robust slope is clearly nonzero only for seed 0 (0.14) and at k = 64 (0.28). Mass is held distributed and redundantly, and a subspace swap moves only a small part of it.
-   - **Computation, not lookup:** a model trained without the combination m in [3, 5] with |F| ≥ 7 (`ood-combo`) still produces the right velocities when that mass is written in under such a force. Effect 0.86, IIA 0.87 on the held-out combination, vs 0.78 / 0.75 on seen pairs and 0.88 / 0.88 for the iid model. Its moving-span loss on real held-out-combination episodes is only 4% above the iid model's (0.272 vs 0.262).
-7. **Not yet tested:** the `compose` split, interventions on `nat`, and mu / F as intervention targets.
+   - **Write:** writing the true value into a 32-D subspace at L4–L5 makes the model produce the counterfactual, F-dependent velocities.
+     - Mass in `num`: robust slope 0.67–0.91 on 3 seeds, with tight CIs.
+     - Mass in `nat`: 0.92 at L5.
+     - Friction in `num`: 0.84 at L5.
+     - The CE gap is 0.03–0.29 against 0.001 on a random-init model.
+   - **Read:** swapping in another episode's own activations transfers little.
+     - Mass in `num`: CE gap +0.007 to +0.018, CIs excluding 0 and the shuffled control on every seed. Slope 0.14 on seed 0, 0.01 on seeds 1–2.
+     - `nat` and mu: about 0.
+     - So the variable is held distributed and redundantly, and a 32-D swap moves little of it.
+   - **Computation, not lookup (2 seeds):** `ood-combo`-trained models produce the right velocity for an unseen mass × force combination when the mass is written in. Held-out effect 0.86 / 0.87 vs seen 0.78 / 0.72. Their moving-span loss on real held-out-combination episodes is about 4% above the iid model's.
+   - **No composition:** a model trained on frictionless-with-force and friction-while-coasting episodes (`compose`) fails on friction and force together. Moving-span loss is 3.7× its training-part loss; stuck-span loss rises from 0.006 to 1.08, since it never saw stiction under a force. Its mass pathway (F/m) still responds correctly to written mass, but it doesn't combine friction with force.
+7. **Not yet tested:** a second `compose` seed, `nat` for the `ood-combo` / `compose` designs, and the `nat` ablations. F is not an intervention target, because it is stated in every span.
 
 ## Files
 
@@ -33,7 +41,7 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
 | `sim.py` | Simulator; `num`, `nat`, `qual`, `rel`, `sym` verbalizers and parsers; identifiability; counterfactual twins; dataset splits; self-checks | all checks pass |
 | `train.py` | Char-level GPT from scratch (6 layers, d=256, 8 heads, about 5M params), one episode per sequence, with resume, seed and split arguments | working |
 | `probe.py` | Ridge/MLP probes on the residual stream (end or mean pooling), random-init and observables baselines, GPU-MLP ceiling, OOD scoring, next-token loss split by moving/stuck spans | working |
-| `intervene.py` | Interchange interventions on mass (`num` only): counterfactual pairs, DAS / steering / probe / random directions, greedy-decode and CE scoring | working |
+| `intervene.py` | Interchange interventions on mass or friction (`num` and `nat`): counterfactual pairs (iid / `ood-combo` / `compose` designs), DAS / steering / probe / random directions, greedy-decode and CE scoring with CIs | working |
 | `requirements.txt` | torch ≥ 2.6, numpy, scikit-learn, psutil | |
 | `HANDOFF.md` | How to resume in a new chat | |
 | `ckpt/*.pt`, `*.log` | Checkpoints and logs (gitignored, local only). Each results section names its files | |
@@ -62,7 +70,7 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
 - Emission: every 5 recorded steps, plus every step with an event (`force_change`, `start`, `stop`). Each emitted step is one span `[char_start, char_end, step]`.
 - `identifiable(tr)` returns `{"m": bool, "mu": bool}`. In the kinetic regime a = F·(1/m) − g·s·mu, so both are identifiable iff two observed (F, s) rows are linearly independent. mu alone is also identifiable from any coast row. Over 500 seeds: m is identifiable in 414 episodes, mu in 416.
 - `make_episode(seed, **changes)`: changes make a counterfactual twin (for example `m=4.0`), with `cf_of` pointing to the base id.
-- `make_episode(seed, m_switch=[r0, m])`: the mass changes to m at recorded step r0 (the state at r0 is unchanged). The text is identical to the original up to step r0. Used as the intervention target.
+- `make_episode(seed, m_switch=[r0, m])` / `mu_switch=[r0, mu]`: the mass (friction) changes at recorded step r0 (the state at r0 is unchanged). The text is identical to the original up to step r0. Used as the intervention target.
 - Template RNG seeds: `qual` uses `f"{seed}-surface"`, `nat` `f"{seed}-surface-nat"`, `rel` `f"{seed}-surface-rel"`. Each sentence type has 2–3 phrasings.
 - Commands: `python sim.py` runs the self-checks. `python sim.py N out.jsonl` writes N episodes.
 
@@ -100,20 +108,36 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
 
 ### `intervene.py`
 
-- `python intervene.py [ckpt=ckpt/num_45k.pt] [n_train=2000] [n_test=400] [n_probe=2000] [k=1] [pos=all|last|span]`. Env options: `LAYERS=3,4,5` (default 1–6), `SRC=mean|end` (B's source activation), `BSRC=last|fc` (B's source span), `BID=1` (B's prefix must identify m_B), `STEER=logm|invm`, `COMBO=1` (pairs for an `ood-combo` model: held-out pairs are unseen combinations, m_B in [3, 5] and |F| ≥ 7 at r0; test set half held-out), `RANDOM=1` (random-init model control; it can't decode, so only the CE gap is defined).
-- Pairs (seeds 50M+, A = even seed, B = the next seed): A's prompt ends at a span where a new nonzero force starts (step r0 ≥ 10), so the next velocity needs F/m. Target: `m_switch=[r0, m_B]`. Pairs are kept when the counterfactual changes v at the next emitted step r1 by at least 0.05 and emits the same step. B masses in [2, 3] are held out of DAS training.
+- `python intervene.py [ckpt=ckpt/num_45k.pt] [n_train=2000] [n_test=400] [n_probe=2000] [k=1] [pos=all|last|span]`. The channel (`num` or `nat`) comes from the checkpoint. Env options:
+  - `TARGET=m|mu` (default m);
+  - `SPLIT=iid|combo|compose` (`COMBO=1` is an alias for combo; see below);
+  - `LAYERS=3,4,5` (default 1–6);
+  - `SRC=mean|end` (B's source activation), `BSRC=last|fc` (B's source span), `BID=1` (B's prefix must identify B's value);
+  - `STEER=logm|invm|lin` (default log m for mass, linear for mu);
+  - `RANDOM=1` (random-init model control; it can't decode, so only the CE gap is defined);
+  - `OUT=path.npz` (save per-pair decoded v and target CE for every condition).
+- Pairs (seeds 50M+, A = even seed, B = the next seed): A's prompt ends at a span where a new nonzero force starts (step r0 ≥ 10). Target: `<TARGET>_switch=[r0, B's value]`. Pairs are kept when:
+  - the counterfactual changes v at the next emitted step r1 by at least 0.05 (`num`) or 0.15 (`nat`, which states v to 0.1);
+  - it emits the same step;
+  - its text up to r0 is identical (`nat` states events at r0, e.g. "starts moving", which can depend on the switched value).
+- Held-out pairs (never used to train DAS):
+  - `iid`: B's value in [2, 3] kg (mu: [0.1, 0.15]).
+  - `combo` (for an `ood-combo` model): A and B are train-part episodes, and held out = an unseen combination (m_B in [3, 5] and |F| ≥ 7 at r0).
+  - `compose` (for a `compose` model): held out = A is a test-part episode (friction and force together); seen = A is a frictionless train-part episode. B is a frictionless train-part episode.
+  - For `combo` and `compose`, the test set is half held-out pairs.
 - Intervention: at layer L's output, overwrite A's coordinates in a k-dim orthonormal subspace U with c, at positions given by `pos`: `all`; `last` = from A's last prompt span on, generated tokens included; `span` = that span only.
 - Conditions:
   - `das`: U learned with the model frozen, teacher-forced CE on the counterfactual span; c = B's activations (mean over its source span) projected on U.
   - `das-shuf`: as `das`, but trained with another pair's B as source.
   - `ablate`: c = the mean c.
-  - `das-steer`: c = α·log m_B + β, learned. Not an interchange: it writes the true value.
+  - `das-steer`: c = α·f(z_B) + β, learned (f = log m, or mu). Not an interchange: it writes the true value.
   - `probe` / `random` directions (k = 1).
 - Metrics on held-out pairs:
   - greedy-decoded v at r1: `effect` = (v_patched − v_clean)/(v_cf − v_A), median; `iia` = share closer to v_cf than to v_A.
   - **`src slope` / `r`** = Theil–Sen slope (since 2026-10-03 round 2; earlier logs use a slope through 0) and correlation of v_patched(B) − v_patched(B′) on v_cf(B) − v_cf(B′), with B′ a second source for the same A. `r` is outlier-sensitive. This is the key number: erasing A's mass already moves v toward a random B's counterfactual (regression to the mean), and `src` is 0 for any source-independent change.
-  - Teacher-forced target CE with the matched source and with B′.
-- Timing on a 4090: about 3–4 min per layer at 2000/400 pairs. Several runs can share the GPU.
+  - Teacher-forced target CE with the matched source and with B′. **CE gap** = the difference: mean with a bootstrap 95% CI (1000 resamples of pairs), also split held-out / seen. The src slope has a Theil–Sen 95% CI.
+- `nat` decoding stops at the state sentence ("… mark." / "… m/s."), and r1 is checked through the stated time gap.
+- Timing on a 4090: about 3–4 min per layer at 2000/400 pairs (`nat` about 2× longer). Several runs can share the GPU.
 
 ## Results
 
@@ -447,6 +471,63 @@ Reading:
 - The read (`das`) effect is weak here too, as on the iid model.
 - Caveat: one seed for the `ood-combo` model. The held-out region is an interpolation in m and in |F| separately (both ranges were seen, just not together).
 
+### Interventions, round 3: CIs, `nat`, friction, `compose`, second `ood-combo` seed (2026-10-04, RunPod)
+
+Logs (local, gitignored): `r3_ci_s{0,1,2}.log`, `r3_nat.log`, `r3_mu.log`, `r3_compose_ref.log`, `r3_compose_model.log`, `r3_combo_s1.log`, `train_num_compose.log`, `train_num_ood-combo_s1.log`, `probe_num_compose_mean.log`. Per-pair outputs: `out/*.npz` (gitignored). All rows: k = 32, `pos=all`. CIs: bootstrap for the CE gap, Theil–Sen for the slope.
+
+**Mass in `num`, L4, 1000 test pairs:**
+
+| seed | `das` CE gap [95% CI] | `das-shuf` gap | `das` slope [CI] | `das-steer` slope [CI] | `das-steer` gap |
+|---|---|---|---|---|---|
+| 0 | +0.018 [+0.015, +0.022] | +0.002 | 0.14 [0.11, 0.17] | 0.91 [0.88, 0.93] | +0.172 |
+| 1 | +0.010 [+0.008, +0.013] | +0.001 | 0.01 [0.00, 0.02] | 0.67 [0.63, 0.70] | +0.099 |
+| 2 | +0.007 [+0.004, +0.009] | −0.001 | 0.01 [0.00, 0.03] | 0.84 [0.82, 0.87] | +0.154 |
+
+**Mass in `nat`** (`nat_45k`, 1000 test pairs; v stated to 0.1, so pairs need |v_cf − v_A| ≥ 0.15):
+
+| | L3 | L4 | L5 |
+|---|---|---|---|
+| `das-steer` slope [CI] / effect / iia | 0.60 [0.57, 0.64] / 0.67 / 0.66 | 0.84 [0.81, 0.86] / 0.84 / 0.79 | 0.92 [0.90, 0.94] / 0.86 / 0.82 |
+| `das-steer` CE gap (clean target CE 0.339) | +0.026 | +0.052 | +0.051 |
+| `das` CE gap / slope | +0.000 / 0.00 | +0.002 / 0.00 | +0.001 / 0.00 |
+
+**Friction** (`num_45k`, `TARGET=mu`, 1000 test pairs; median |v_cf − v_A| 0.22):
+
+| | L3 | L4 | L5 |
+|---|---|---|---|
+| `das-steer` slope [CI] / effect / iia | 0.49 [0.45, 0.54] / 0.44 / 0.54 | 0.78 [0.74, 0.82] / 0.59 / 0.63 | 0.84 [0.81, 0.88] / 0.66 / 0.67 |
+| `das-steer` CE gap | +0.034 | +0.051 | +0.065 |
+| `das` CE gap (`das-shuf`) | +0.002 (+0.000) | +0.004 (+0.001) | +0.005 (+0.002) |
+
+**Second `ood-combo` seed** (`ckpt/num_ood-combo_s1.pt`, validation loss 0.2108; `SPLIT=combo`, L4):
+
+| | held-out combination: effect / iia | seen: effect / iia |
+|---|---|---|
+| `das-steer` | 0.87 / 0.85 | 0.72 / 0.71 |
+| `ablate` | 0.00 / 0.19 | 0.14 / 0.38 |
+| `das` | 0.05 / 0.25 | 0.18 / 0.40 |
+
+This replicates seed 0 (held out 0.86 / 0.87). The src slope and CE gap are uninformative on held-out combo rows: B and B′ both have m in [3, 5], so v_cf(B) − v_cf(B′) is tiny. Read effect and IIA there.
+
+**`compose`** (`ckpt/num_compose.pt`: `num`, 45k steps, seed 0, trained on frictionless episodes with forces plus episodes with friction and no force; validation loss 0.1410). `SPLIT=compose`, L4, 300 held-out pairs (A has friction and force) and 300 seen pairs (A frictionless):
+
+| | held out: effect / iia / slope | seen: effect / iia / slope |
+|---|---|---|
+| `compose` model, `das-steer` | 0.82 / 0.74 / 0.85 | 0.91 / 0.90 / 0.87 |
+| `compose` model, clean target CE / clean iia | 1.687 overall / 0.29 | 0.02 |
+| iid model, `das-steer` | 0.87 / 0.72 / 0.92 | 0.91 / 0.86 / 0.92 |
+
+Next-token loss per token on the `compose` parts (`probe_num_compose_mean.log`): train part moving 0.209, stuck 0.006; **test part moving 0.765, stuck 1.079**.
+
+Reading:
+- **Write effects generalize across channel and parameter.** The written mass works in `nat` as in `num` (L5 slope 0.92), and written friction works too (0.84). The model's dynamics read both hidden parameters from a 32-D L4–L5 subspace.
+- **The read side stays weak everywhere.** It is statistically real for mass in `num` (all 3 CIs exclude 0 and the control), but small: slope 0.01–0.14. It is about 0 for `nat` and for mu. The parameters are not stored as swappable low-dimensional variables.
+- **Computation, not lookup, on 2 seeds** (`ood-combo`).
+- **No compositional reuse** (`compose`, 1 seed):
+  - The model learned friction only from coasting and force only without friction, and fails on both together. Moving-span loss is 3.7× its training level, and it has no notion of stiction under a force.
+  - The mass write still works on these episodes, but the counterfactual difference (F/m_B − F/m_A)·Δt doesn't involve mu. So this tests the F/m pathway only, which was trained.
+  - The operator reuses its parts for new values (combo) but not for new combinations of mechanisms (compose).
+
 ## Dataset splits (built 2026-10-02)
 
 `sim.SPLITS`, `sim.split_episodes(split, part, n, start_seed)`; `python train.py <ch> <n> <steps> <seed> <split>` trains on the train part only; `python probe.py <ckpt> <n> <pool> <split>` fits probes on the train part and scores them on the test part, and prints next-token loss on both parts.
@@ -459,7 +540,7 @@ Reading:
 | `compose` | mu = 0, or F = 0 throughout (50/50) | mu > 0 and some F ≠ 0 | 100% / 100% | 83% (train part: 51%) |
 
 - Scores on OOD splits are **1 − MSE / Var_train** (targets standardized with the train part's stats), not R². Plain R² on a narrow test region such as m in [3, 5] divides by that region's small variance and goes to −30 even for decent predictions. 1 means perfect; 0 means an error as large as the training spread. Predicting the train mean scores below 0 on a shifted region.
-- `ood-extrap` needs no retraining: existing iid models never saw m > 5 (done; see Results). `ood-combo` is trained (`ckpt/num_ood-combo.pt`, see "Interventions, round 2"). `compose` is not run yet.
+- `ood-extrap` needs no retraining: existing iid models never saw m > 5 (done; see Results). `ood-combo` is trained on 2 seeds (`ckpt/num_ood-combo.pt`, `ckpt/num_ood-combo_s1.pt`) and `compose` on 1 (`ckpt/num_compose.pt`); see "Interventions, rounds 2–3".
 - Not built: the `cross-channel` split. It needs mixed-channel training in `train.py`, and probes fit on one channel and scored on another.
 
 ## Known issues and open questions
@@ -472,14 +553,17 @@ Reading:
 - The citations in `project_idea.md` must be verified, especially arXiv 2607.27017, Paperlayer 2607.20058, and the PhysLang characterization.
 - Related work missing from `project_idea.md`: Vafa et al. 2025 ("What has a foundation model found?", an inductive-bias probe on orbital mechanics; the closest prior work), Vafa et al. 2024 (world-model evaluation metrics), Li, Nye, Andreas 2021 (implicit entity state in text), and Othello-GPT.
 - Interventions:
-  - The DAS read effect is small (CE gap 0.006–0.019 across seeds). There are no per-pair bootstrap SEs yet; per-pair outputs are not saved.
+  - The DAS read effect is small (CE gap 0.007–0.018 across seeds, CIs exclude 0).
+  - On held-out `combo` rows, the src slope and CE gap are uninformative (narrow source range). Use effect and IIA there.
+  - The mass write test on `compose` doesn't involve mu, so it can't show composition. A mu write test on `compose` would.
   - `das-steer` at k = 8 failed to train once (`BSRC=fc`, L4: loss above `das`), so check training losses before reading a row.
   - Greedy decoding of `num` sometimes emits an unexpected step; about 5–10% of pairs are dropped per condition.
 
 ## Not built yet
 
-- Interventions on `nat`, and mu and F as intervention targets. Bootstrap SEs for the intervention metrics.
-- Training on `compose`, and a wide-mass reference model for `ood-extrap`.
+- A mu write test on the `compose` model, and a second `compose` seed.
+- Interventions for the `nat` `ood-combo` / `compose` designs (needs `nat` models trained on those splits).
+- A wide-mass reference model for `ood-extrap`.
 - The `cross-channel` split (mixed-channel training, with probes fit on one channel and scored on another).
 - The `nat` ablations: `nat-noterm`, `nat-notime`, `nat-nocause`, `nat-short`.
 - Phase 2: collisions.

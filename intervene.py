@@ -1,36 +1,42 @@
-"""Interchange interventions on the model's mass variable (the operator question, decision 1). num channel only.
+"""Interchange interventions on a hidden parameter (mass or friction; the operator question, decision 1).
 
-python intervene.py [ckpt=ckpt/num_45k.pt] [n_train=2000] [n_test=400] [n_probe=2000] [k=1] [pos=all|last]
+python intervene.py [ckpt=ckpt/num_45k.pt] [n_train=2000] [n_test=400] [n_probe=2000] [k=1] [pos=all|last|span]
 k: dimension of the patched subspace (u below is then an orthonormal d x k basis; probe row only for k = 1).
 pos: overwrite at every position (all), or only from A's last prompt span on (last: the span with the new force,
      and the decoded / target tokens), or only on that span (span: the decoded tokens are not patched, so any effect
      reaches them through attention to the patched prompt).
+The channel (num or nat) comes from the checkpoint.
 
 Pairs (A, B): A's text up to a span where a new nonzero force starts (step r0) is the prompt, so the next span's
-velocity needs the new acceleration F/m - g s mu, i.e. the mass. The target is the simulator's counterfactual: A with
-B's mass from step r0 on (sim m_switch). The texts agree up to r0 and differ from the next emitted step r1.
+velocity needs the new acceleration F/m - g s mu. The target is the simulator's counterfactual: A with B's value of
+the target parameter (env TARGET=m|mu, default m) from step r0 on (sim m_switch / mu_switch). The texts agree up to
+r0 and differ from the next emitted step r1.
 
 Intervention at layer L along a unit direction u, at every position: overwrite A's coordinate h.u with c.
   das       u learned (model frozen) so the patched model predicts the counterfactual span (teacher-forced CE);
             c = c_B, B's own activations averaged over its last span up to r0 (where the probe reads mass), projected on u
   ablate    das's u, c = the mean c_B over training pairs (erases A's value, carries no source information)
   das-shuf  control: trained with c_B taken from another pair's B (source unrelated to the target)
-  das-steer u learned with c = alpha * log m_B + beta (alpha, beta learned; env STEER=invm uses 1 / m_B): the best
-            any k-D variable linear in log m (or 1/m) can do
-  probe     the ridge log_m probe direction, c = c_B
+  das-steer u learned with c = alpha * f(z_B) + beta (alpha, beta learned): the best any k-D variable linear in f(z)
+            can do. f = log m for mass (env STEER=invm: 1 / m), mu itself for friction.
+  probe     the ridge probe direction for the target, c = c_B
   random    a random unit direction, c = c_B
 Scored on held-out pairs by greedy decoding the next span:
-  effect = (v_patched - v_clean) / (v_cf - v_A) at step r1, median   (1 = the simulator's full mass effect)
+  effect = (v_patched - v_clean) / (v_cf - v_A) at step r1, median   (1 = the simulator's full effect)
   iia    = share of pairs whose decoded v is closer to v_cf than to v_A (the clean model gives the floor)
-  src    = Theil-Sen slope and correlation of v_patched(B) - v_patched(B') against v_cf(B) - v_cf(B'), with B' a
-           second source for the same A. Erasing A's mass moves v toward the average mass, which already looks like a
+  src    = Theil-Sen slope [95% CI] and correlation of v_patched(B) - v_patched(B') against v_cf(B) - v_cf(B'), with
+           B' a second source for the same A. Erasing A's value moves v toward the average, which already looks like a
            partial effect toward a random B; src is 0 for any source-independent change. Ideal slope 1.
-  CE gap = target CE with source B' minus with source B (teacher-forced): the source information actually used.
-DAS training pairs exclude B masses in HOLD; test rows split by whether m_B is in HOLD.
-Env COMBO=1 (for a model trained on the ood-combo split): A and B are both ood-combo train-part episodes, and a pair
-is held out when the counterfactual is an unseen combination (m_B in [3, 5] and |F| >= 7 at r0). DAS trains on the
-other pairs only; the test set is half held-out pairs, half others.
+  CE gap = target CE with source B' minus with source B (teacher-forced), mean [bootstrap 95% CI]: the source
+           information actually used. Also given for held-out and seen pairs separately.
+Env SPLIT (pair design; DAS always trains on non-held-out pairs):
+  iid      held out = B's value in HOLD.
+  combo    (alias COMBO=1; for a model trained on ood-combo) A and B are ood-combo train-part episodes; held out = the
+           counterfactual is an unseen combination (m_B in [3, 5] and |F| >= 7 at r0). Test set half held out.
+  compose  (for a model trained on compose) held out = A is a compose test-part episode (friction and force together);
+           seen = A is a train-part episode (mu = 0). B is a frictionless train-part episode. Test set half held out.
 Env RANDOM=1: use a random-init model with the checkpoint's shapes (control; it can't decode, so read the CE gap).
+Env OUT=path.npz: save per-pair outputs (decoded v, target CE) for every condition.
 """
 import math, os, random, sys
 import numpy as np, torch, torch.nn.functional as F
@@ -41,27 +47,44 @@ from probe import PROBE_SEED, residuals, targets
 from train import BOS, GPT, PAD, load
 
 PAIR_SEED = 50_000_000
-LOG_M = 4  # column of probe.targets
-MIN_DV = 0.05  # keep pairs whose counterfactual changes v at r1 by at least this
-HOLD = (2.0, 3.0)  # B masses never used to train DAS
-STEER = {"logm": math.log, "invm": lambda m: 1 / m}[os.environ.get("STEER", "logm")]  # das-steer variable: log m or 1/m
+TARGET = os.environ.get("TARGET", "m")
+assert TARGET in ("m", "mu")
+TCOL = {"m": 4, "mu": 5}[TARGET]  # column of probe.targets (log_m, mu)
+HOLD = {"m": (2.0, 3.0), "mu": (0.1, 0.15)}[TARGET]  # source values never used to train DAS (SPLIT=iid)
+STEER = {"logm": math.log, "invm": lambda m: 1 / m, "lin": lambda z: z}[os.environ.get("STEER", "logm" if TARGET == "m" else "lin")]
+MIN_DV = {"num": 0.05, "nat": 0.15}  # keep pairs whose counterfactual changes v at r1 by at least this (above rounding)
 SRC = os.environ.get("SRC", "mean")  # source activation: mean over B's last span, or its last token (end)
 LAYERS = [int(x) for x in os.environ.get("LAYERS", "1,2,3,4,5,6").split(",")]
-BID = os.environ.get("BID") == "1"  # keep only pairs whose B prefix (up to r0) identifies m_B
+BID = os.environ.get("BID") == "1"  # keep only pairs whose B prefix (up to r0) identifies B's value
 BSRC = os.environ.get("BSRC", "last")  # B's source span: its last span up to r0, or (fc) its last force-change span
-COMBO = os.environ.get("COMBO") == "1"
+SPLIT = "combo" if os.environ.get("COMBO") == "1" else os.environ.get("SPLIT", "iid")
+assert SPLIT in ("iid", "combo", "compose") and (SPLIT != "combo" or TARGET == "m")
 RANDOM = os.environ.get("RANDOM") == "1"
+CH = "num"  # set from the checkpoint in main
 
 
 def probe_dirs(model, stoi, n):
-    """-> per layer 1.., the ridge log_m direction in raw activation space (mean-pooled spans)."""
+    """-> per layer 1.., the ridge probe direction for the target in raw activation space (mean-pooled spans)."""
     eps = sim.split_episodes("iid", "train", n, PROBE_SEED)
-    y = targets(eps, "num")[0][:, LOG_M]
+    y = targets(eps, CH)[0][:, TCOL]
     out = []
-    for X in residuals(model, eps, stoi, "num", "mean")[1:]:
+    for X in residuals(model, eps, stoi, CH, "mean")[1:]:
         sd = X.std(0) + 1e-6
         out.append(RidgeCV(alphas=np.logspace(-1, 4, 6)).fit((X - X.mean(0)) / sd, (y - y.mean()) / y.std()).coef_ / sd)
     return out
+
+
+def overrides(seed, rng):
+    """-> (A's param overrides, B's, held out?) for this seed under SPLIT, or None to skip the seed.
+    For combo, "held" is decided per candidate later (it depends on r0), so it is None here."""
+    if SPLIT == "iid":
+        return {}, {}, None
+    if SPLIT == "combo":
+        ok = not sim.in_combo(sim.sample_params(random.Random(seed))) and not sim.in_combo(sim.sample_params(random.Random(seed + 1)))
+        return ({}, {}, None) if ok else None
+    held = rng.random() < 0.5
+    ovA = sim.split_overrides("compose", "test" if held else "train", seed)
+    return None if ovA is None else (ovA, {"mu": 0.0}, held)
 
 
 def make_pairs(done):
@@ -72,42 +95,52 @@ def make_pairs(done):
     for seed in range(PAIR_SEED, 10 ** 9, 2):
         if done(pairs):
             return pairs
-        A, B = sim.make_episode(seed), sim.make_episode(seed + 1)
-        if COMBO and (sim.in_combo(A["params"]) or sim.in_combo(B["params"])):
-            continue  # both must be ood-combo train-part episodes
-        spans, cand = A["texts"]["num"]["spans"], []
+        if (o := overrides(seed, rng)) is None:
+            continue
+        ovA, ovB, held = o
+        A, B = sim.make_episode(seed, **ovA), sim.make_episode(seed + 1, **ovB)
+        zB = B["params"][TARGET]
+        spans, cand = A["texts"][CH]["spans"], []
         for i, (_, s1, r0) in enumerate(spans[:-1]):
             if r0 < 10 or "force_change" not in A["traj"]["events"][r0] or A["traj"]["F"][r0] == 0:
                 continue
-            cf = sim.make_episode(seed, m_switch=[r0, B["params"]["m"]])
-            r1, cft = spans[i + 1][2], cf["texts"]["num"]
-            j = next(k for k, (c0, _, _) in enumerate(cft["spans"]) if c0 > s1)
-            if cft["spans"][j][2] == r1 and abs(cf["traj"]["v"][r1] - A["traj"]["v"][r1]) >= MIN_DV:
-                assert cft["text"][:s1 + 1] == A["texts"]["num"]["text"][:s1 + 1]
+            cf = sim.make_episode(seed, **ovA, **{TARGET + "_switch": [r0, zB]})
+            r1, cft = spans[i + 1][2], cf["texts"][CH]
+            j = next((k for k, (c0, _, _) in enumerate(cft["spans"]) if c0 > s1), None)  # nat text can be shorter
+            if j is None:
+                continue
+            # nat states events at r0 (e.g. "starts moving"), which can depend on the switched value: skip those
+            if (cft["spans"][j][2] == r1 and abs(cf["traj"]["v"][r1] - A["traj"]["v"][r1]) >= MIN_DV[CH]
+                    and cft["text"][:s1 + 1] == A["texts"][CH]["text"][:s1 + 1]):
                 cand.append(dict(r0=r0, r1=r1, cut=s1 + 1, target=cft["text"][cft["spans"][j][0]:cft["spans"][j][1]],
-                                 vA=A["traj"]["v"][r1], vcf=cf["traj"]["v"][r1]))
-        if cand:
-            p = rng.choice(cand)
-            id_at = lambda r: sim.identifiable({k: v[:r + 1] for k, v in B["traj"].items()})["m"]
-            if BSRC == "fc":  # B's source span: its last force-change span (as A's r0) where its prefix identifies m_B
-                bs = [s for s in B["texts"]["num"]["spans"] if "force_change" in B["traj"]["events"][s[2]]
-                      and B["traj"]["F"][s[2]] != 0 and id_at(s[2])]
-                if not bs:
-                    continue
-                b0, b1, _ = bs[-1]
-            else:
-                if BID and not id_at(p["r0"]):
-                    continue  # B's own text up to r0 doesn't determine its mass, so B's activations can't carry it
-                b0, b1, _ = [s for s in B["texts"]["num"]["spans"] if s[2] <= p["r0"]][-1]
-            pairs.append(dict(p, seed=seed, A_start=spans[[s[2] for s in spans].index(p["r0"])][0] + 1, A=A["texts"]["num"]["text"][:p["cut"]], B=B["texts"]["num"]["text"][:b1 + 1],
-                              B_span=(b0, b1), mA=A["params"]["m"], mB=B["params"]["m"], tr1=A["traj"]["t"][p["r1"]],
-                              combo=3 <= B["params"]["m"] <= 5 and abs(A["traj"]["F"][p["r0"]]) >= 7))
+                                 vA=A["traj"]["v"][r1], vcf=cf["traj"]["v"][r1], A_start=spans[i][0] + 1))
+        if not cand:
+            continue
+        p = rng.choice(cand)
+        id_at = lambda r: sim.identifiable({k: v[:r + 1] for k, v in B["traj"].items()})[TARGET]
+        if BSRC == "fc":  # B's source span: its last force-change span (as A's r0) where its prefix identifies z_B
+            bs = [s for s in B["texts"][CH]["spans"] if "force_change" in B["traj"]["events"][s[2]]
+                  and B["traj"]["F"][s[2]] != 0 and id_at(s[2])]
+            if not bs:
+                continue
+            b0, b1, _ = bs[-1]
+        else:
+            if BID and not id_at(p["r0"]):
+                continue  # B's own text up to r0 doesn't determine its value, so B's activations can't carry it
+            b0, b1, _ = [s for s in B["texts"][CH]["spans"] if s[2] <= p["r0"]][-1]
+        if SPLIT == "iid":
+            held = HOLD[0] <= zB <= HOLD[1]
+        elif SPLIT == "combo":
+            held = 3 <= zB <= 5 and abs(A["traj"]["F"][p["r0"]]) >= 7
+        t = A["traj"]["t"]
+        pairs.append(dict(p, seed=seed, ov=ovA, A=A["texts"][CH]["text"][:p["cut"]], B=B["texts"][CH]["text"][:b1 + 1],
+                          B_span=(b0, b1), zB=zB, tr1=t[p["r1"]], dt1=round(t[p["r1"]] - t[p["r0"]], 1), held=held))
 
 
-def v_cf(p, m):
-    """v at r1 of A with mass m from r0, or nan if that counterfactual emits a different step after the prompt."""
-    cf = sim.make_episode(p["seed"], m_switch=[p["r0"], m])
-    nxt = next(r for c0, _, r in cf["texts"]["num"]["spans"] if c0 >= p["cut"])
+def v_cf(p, z):
+    """v at r1 of A with value z from r0, or nan if that counterfactual emits a different step after the prompt."""
+    cf = sim.make_episode(p["seed"], **p["ov"], **{TARGET + "_switch": [p["r0"], z]})
+    nxt = next((r for c0, _, r in cf["texts"][CH]["spans"] if c0 >= p["cut"]), None)
     return cf["traj"]["v"][p["r1"]] if nxt == p["r1"] else math.nan
 
 
@@ -132,9 +165,9 @@ def overwrite(model, L, U, c, start):
     return model.blocks[L - 1].register_forward_hook(hook)
 
 
-def train_das(model, L, ids, n_prompt, hB, start, k=1, logm=None, steps=800, bs=32, seed=0):
+def train_das(model, L, ids, n_prompt, hB, start, k=1, z=None, steps=800, bs=32, seed=0):
     """ids: list of prompt + target token lists; loss on the target tokens only.
-    c = hB @ U, or with logm given (steer mode) c = alpha * logm + beta (alpha, beta in R^k). -> U, (alpha, beta), final loss"""
+    c = hB @ U, or with z given (steer mode) c = alpha * z + beta (alpha, beta in R^k). -> U, (alpha, beta), final loss"""
     g = torch.Generator().manual_seed(seed)
     u = torch.nn.Parameter(torch.randn(hB.shape[-1], k, generator=g).cuda())
     ab = torch.nn.Parameter(torch.stack([torch.ones(k), torch.zeros(k)]).cuda())
@@ -142,7 +175,7 @@ def train_das(model, L, ids, n_prompt, hB, start, k=1, logm=None, steps=800, bs=
     for _ in range(steps):
         idx = torch.randint(len(ids), (bs,), generator=g)
         un = torch.linalg.qr(u)[0]
-        c = hB[idx.cuda()] @ un if logm is None else logm[idx.cuda(), None] * ab[0] + ab[1]
+        c = hB[idx.cuda()] @ un if z is None else z[idx.cuda(), None] * ab[0] + ab[1]
         loss = target_ce(model, ids, n_prompt, idx.tolist(), (L, un, c, start[idx.cuda()])).mean()
         opt.zero_grad()
         loss.backward()
@@ -169,18 +202,24 @@ def target_ce(model, ids, n_prompt, idx, patch=None):
 
 @torch.no_grad()
 def test_ce(model, ids, n_prompt, patch=None):
-    """Mean target CE over all test pairs; patch = (L, U, c, start) with one c / start row per pair."""
+    """-> per test pair target CE (numpy); patch = (L, U, c, start) with one c / start row per pair."""
     out = []
     for i in range(0, len(ids), 64):
         idx = list(range(i, min(i + 64, len(ids))))
         p = patch and (patch[0], patch[1], patch[2][i:i + 64], patch[3][i:i + 64])
         out.append(target_ce(model, ids, n_prompt, idx, p))
-    return float(torch.cat(out).mean())
+    return torch.cat(out).cpu().numpy()
+
+
+def span_done(text):
+    """A decoded span is complete: num spans end ' .', nat spans end with the state sentence ('... mark.' / '... m/s.')."""
+    return text.endswith(" .") if CH == "num" else text.endswith(("mark.", "m/s."))
 
 
 @torch.no_grad()
-def decode(model, prompts, itos, L=None, u=None, c=None, start=None, max_new=40):
-    """Greedy decode one span (ending ' .') per prompt, optionally with overwrite(L, u, c, start) active."""
+def decode(model, prompts, itos, L=None, u=None, c=None, start=None):
+    """Greedy decode one span per prompt, optionally with overwrite(L, u, c, start) active."""
+    max_new = 40 if CH == "num" else 120
     outs = []
     for i in range(0, len(prompts), 64):
         P = prompts[i:i + 64]
@@ -196,7 +235,7 @@ def decode(model, prompts, itos, L=None, u=None, c=None, start=None, max_new=40)
                 if not done[b]:
                     ch = itos.get(int(nxt[b]), "")
                     text[b] += ch
-                    done[b] = text[b].endswith(" .") or not ch
+                    done[b] = span_done(text[b]) or not ch
             X[torch.arange(len(P)), cur] = nxt
             cur += 1
             if all(done):
@@ -212,11 +251,23 @@ def decoded_v(outs, pairs):
     v = []
     for o, p in zip(outs, pairs):
         try:
-            z = sim.parse_num(o)
-            v.append(z["v"] if z["t"] == p["tr1"] else math.nan)
-        except (AttributeError, ValueError):
+            if CH == "num":
+                z = sim.parse_num(o)
+                v.append(z["v"] if z["t"] == p["tr1"] else math.nan)
+            else:
+                z = sim.parse_nat(o)
+                v.append(z["v"] if z.get("dt") == p["dt1"] and "v" in z else math.nan)
+        except (AttributeError, ValueError, TypeError):
             v.append(math.nan)
     return np.array(v)
+
+
+def boot_ci(x, n=1000):
+    """-> mean, 2.5th and 97.5th percentiles of the bootstrap mean"""
+    if len(x) == 0:
+        return math.nan, math.nan, math.nan
+    means = x[np.random.default_rng(0).integers(0, len(x), (n, len(x)))].mean(1)
+    return x.mean(), *np.percentile(means, [2.5, 97.5])
 
 
 def report(name, v, v2, v_clean, pairs, vcf2, hold, extra=""):
@@ -232,35 +283,36 @@ def report(name, v, v2, v_clean, pairs, vcf2, hold, extra=""):
             ok2 = ok & ~np.isnan(v2) & ~np.isnan(vcf2)
             dp, dc = v[ok2] - v2[ok2], vcf[ok2] - vcf2[ok2]
             if len(dp) >= 5 and dc.std() > 0:
-                cell += f" src slope {theilslopes(dp, dc)[0]:5.2f} r {np.corrcoef(dp, dc)[0, 1]:5.2f}"
+                sl, _, lo, hi = theilslopes(dp, dc, 0.95)
+                cell += f" src slope {sl:5.2f} [{lo:5.2f},{hi:5.2f}] r {np.corrcoef(dp, dc)[0, 1]:5.2f}"
         cells.append(cell)
     print(f"  {name:9s} " + " | ".join(cells) + extra, flush=True)
 
 
 def main():
+    global CH
     path, n_train, n_test, n_probe, k, pos = (sys.argv[1:] + [None] * 6)[:6]
     path, n_train, n_test, n_probe = path or "ckpt/num_45k.pt", int(n_train or 2000), int(n_test or 400), int(n_probe or 2000)
     k, pos = int(k or 1), pos or "all"
     assert pos in ("all", "last", "span")
     model, stoi, ck = load(path)
+    CH = ck["channel"]
+    assert CH in MIN_DV
     if RANDOM:
         torch.manual_seed(1)
         model = GPT(**ck["cfg"]).cuda().eval()
-    assert ck["channel"] == "num"
     for q in model.parameters():
         q.requires_grad_(False)
     itos = {i: c for c, i in stoi.items()}
-    if COMBO:
-        pairs = make_pairs(lambda ps: sum(p["combo"] for p in ps) >= n_test // 2
-                           and sum(not p["combo"] for p in ps) >= n_train + n_test // 2)
-        held, seen = [p for p in pairs if p["combo"]], [p for p in pairs if not p["combo"]]
-        train, test = seen[:n_train], held[:n_test // 2] + seen[n_train:n_train + n_test // 2]
-        hold = np.array([p["combo"] for p in test])
-    else:
+    if SPLIT == "iid":
         pairs = make_pairs(n_train + n_test)
-        train = [p for p in pairs[:n_train] if not HOLD[0] <= p["mB"] <= HOLD[1]]
-        test = pairs[n_train:]
-        hold = np.array([HOLD[0] <= p["mB"] <= HOLD[1] for p in test])
+        train, test = [p for p in pairs[:n_train] if not p["held"]], pairs[n_train:]
+    else:
+        pairs = make_pairs(lambda ps: sum(p["held"] for p in ps) >= n_test // 2
+                           and sum(not p["held"] for p in ps) >= n_train + n_test // 2)
+        held, seen = [p for p in pairs if p["held"]], [p for p in pairs if not p["held"]]
+        train, test = seen[:n_train], held[:n_test // 2] + seen[n_train:n_train + n_test // 2]
+    hold = np.array([p["held"] for p in test])
     enc = lambda t: [stoi[c] for c in t]
     ids = [[BOS] + enc(p["A"]) + enc(p["target"]) for p in train]
     n_prompt = [1 + len(p["A"]) for p in train]
@@ -269,26 +321,43 @@ def main():
     start_train, start_test = starts(train), starts(test)
     hB_train, hB_test = source_acts(model, train, stoi), source_acts(model, test, stoi)
     perm = torch.randperm(len(train), generator=torch.Generator().manual_seed(1))
-    logm_train = torch.tensor([STEER(p["mB"]) for p in train]).cuda()
-    logm_test = torch.tensor([STEER(p["mB"]) for p in test]).cuda()
+    z_train = torch.tensor([STEER(p["zB"]) for p in train]).cuda()
+    z_test = torch.tensor([STEER(p["zB"]) for p in test]).cuda()
     second = np.roll(np.arange(len(test)), 1)  # B' for test pair k is test pair k-1's B
-    vcf2 = np.array([v_cf(p, test[j]["mB"]) for p, j in zip(test, second)])
+    vcf2 = np.array([v_cf(p, test[j]["zB"]) for p, j in zip(test, second)])
     probes = probe_dirs(model, stoi, n_probe) if k == 1 else None
     pA = [[BOS] + enc(p["A"]) for p in test]
     ids_test, np_test = [a + enc(p["target"]) for a, p in zip(pA, test)], [len(a) for a in pA]
-    ce = lambda L, u, c: f" || target CE {test_ce(model, ids_test, np_test, (L, u, c, start_test)):.3f}"
-    def ces(L, u, c):
-        a, b = (test_ce(model, ids_test, np_test, (L, u, cc, start_test)) for cc in (c, c[second]))
-        return f" || target CE {a:.3f}, source B' {b:.3f}, gap {b - a:+.3f}"
+    saved = {}
+
+    def ces(name, L, u, c, both=True):
+        a = test_ce(model, ids_test, np_test, (L, u, c, start_test))
+        saved[f"L{L}_{name}_ce"] = a
+        if not both:
+            return f" || target CE {a.mean():.3f}"
+        b = test_ce(model, ids_test, np_test, (L, u, c[second], start_test))
+        saved[f"L{L}_{name}_ce2"] = b
+        g, lo, hi = boot_ci(b - a)
+        parts = " ".join(f"{t} {(b - a)[m].mean():+.3f}" for t, m in (("held", hold), ("seen", ~hold)))
+        return f" || target CE {a.mean():.3f}, source B' {b.mean():.3f}, gap {g:+.3f} [{lo:+.3f},{hi:+.3f}] ({parts})"
+
+    def run(name, L, u, c):
+        v = decoded_v(decode(model, pA, itos, L, u, c, start_test), test)
+        saved[f"L{L}_{name}"] = v
+        return v
+
     v_clean = decoded_v(decode(model, pA, itos), test)
-    print(f"{path}: k={k}, pos={pos}, src={SRC}, bid={BID}, bsrc={BSRC}, combo={COMBO}, random={RANDOM}, steer={os.environ.get('STEER', 'logm')}, {len(train)} DAS train pairs, {len(test)} test pairs ({hold.sum()} held out: {"combo region" if COMBO else f"m_B in {HOLD}"}), "
+    held_desc = {"iid": f"{TARGET}_B in {HOLD}", "combo": "combo region", "compose": "compose test part"}[SPLIT]
+    print(f"{path}: channel {CH}, target {TARGET}, split {SPLIT}, k={k}, pos={pos}, src={SRC}, bid={BID}, bsrc={BSRC}, "
+          f"random={RANDOM}, {len(train)} DAS train pairs, {len(test)} test pairs ({hold.sum()} held out: {held_desc}), "
           f"median |v_cf - v_A| {np.median([abs(p['vcf'] - p['vA']) for p in test]):.3f}")
-    report("clean", v_clean, None, v_clean, test, vcf2, hold, f" || target CE {test_ce(model, ids_test, np_test):.3f}")
-    run = lambda L, u, c: decoded_v(decode(model, pA, itos, L, u, c, start_test), test)
+    clean_ce = test_ce(model, ids_test, np_test)
+    report("clean", v_clean, None, v_clean, test, vcf2, hold, f" || target CE {clean_ce.mean():.3f}")
+    saved.update(clean=v_clean, clean_ce=clean_ce, held=hold, vA=[p["vA"] for p in test], vcf=[p["vcf"] for p in test], vcf2=vcf2)
     for L in LAYERS:
         u_das, _, loss = train_das(model, L, ids, n_prompt, hB_train[L], start_train, k)
         u_shuf, _, loss_shuf = train_das(model, L, ids, n_prompt, hB_train[L][perm], start_train, k)
-        u_st, ab, loss_st = train_das(model, L, ids, n_prompt, hB_train[L], start_train, k, logm_train)
+        u_st, ab, loss_st = train_das(model, L, ids, n_prompt, hB_train[L], start_train, k, z_train)
         dirs = {"das": u_das, "das-shuf": u_shuf}
         overlap = lambda a, b: float(torch.linalg.svdvals(a.T @ b).max())  # 1 = the subspaces share a direction
         note = ""
@@ -300,11 +369,14 @@ def main():
               f"overlap(das, steer) {overlap(u_das, u_st):.2f}")
         for name, u in dirs.items():
             c = hB_test[L] @ u
-            report(name, run(L, u, c), run(L, u, c[second]), v_clean, test, vcf2, hold, ces(L, u, c))
+            report(name, run(name, L, u, c), run(name + "_B2", L, u, c[second]), v_clean, test, vcf2, hold, ces(name, L, u, c))
         c = (hB_train[L] @ u_das).mean(0).expand(len(test), k)
-        report("ablate", run(L, u_das, c), None, v_clean, test, vcf2, hold, ce(L, u_das, c))
-        c = logm_test[:, None] * ab[0] + ab[1]
-        report("das-steer", run(L, u_st, c), run(L, u_st, c[second]), v_clean, test, vcf2, hold, ces(L, u_st, c))
+        report("ablate", run("ablate", L, u_das, c), None, v_clean, test, vcf2, hold, ces("ablate", L, u_das, c, False))
+        c = z_test[:, None] * ab[0] + ab[1]
+        report("das-steer", run("das-steer", L, u_st, c), run("das-steer_B2", L, u_st, c[second]), v_clean, test, vcf2,
+               hold, ces("das-steer", L, u_st, c))
+        if os.environ.get("OUT"):
+            np.savez(os.environ["OUT"], **{key: np.asarray(val) for key, val in saved.items()})
 
 
 if __name__ == "__main__":
