@@ -34,7 +34,8 @@ Env SPLIT (pair design; DAS always trains on non-held-out pairs):
   combo    (alias COMBO=1; for a model trained on ood-combo) A and B are ood-combo train-part episodes; held out = the
            counterfactual is an unseen combination (m_B in [3, 5] and |F| >= 7 at r0). Test set half held out.
   compose  (for a model trained on compose) held out = A is a compose test-part episode (friction and force together);
-           seen = A is a train-part episode (mu = 0). B is a frictionless train-part episode. Test set half held out.
+           seen = A is a train-part episode (mu = 0). B is a train-part episode: frictionless for TARGET=m, force-free (coasting
+           with friction) for TARGET=mu, so B's value varies. Test set half held out.
 Env RANDOM=1: use a random-init model with the checkpoint's shapes (control; it can't decode, so read the CE gap).
 Env OUT=path.npz: save per-pair outputs (decoded v, target CE) for every condition.
 """
@@ -84,7 +85,8 @@ def overrides(seed, rng):
         return ({}, {}, None) if ok else None
     held = rng.random() < 0.5
     ovA = sim.split_overrides("compose", "test" if held else "train", seed)
-    return None if ovA is None else (ovA, {"mu": 0.0}, held)
+    ovB = {"mu": 0.0} if TARGET == "m" else {"F_segments": [[0.0, 0.0]]}  # mu target: B coasts with friction
+    return None if ovA is None else (ovA, ovB, held)
 
 
 def make_pairs(done):

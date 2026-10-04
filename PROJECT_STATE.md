@@ -29,8 +29,8 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
      - `nat` and mu: about 0.
      - So the variable is held distributed and redundantly, and a 32-D swap moves little of it.
    - **Computation, not lookup (2 seeds):** `ood-combo`-trained models produce the right velocity for an unseen mass × force combination when the mass is written in. Held-out effect 0.86 / 0.87 vs seen 0.78 / 0.72. Their moving-span loss on real held-out-combination episodes is about 4% above the iid model's.
-   - **No composition:** a model trained on frictionless-with-force and friction-while-coasting episodes (`compose`) fails on friction and force together. Moving-span loss is 3.7× its training-part loss; stuck-span loss rises from 0.006 to 1.08, since it never saw stiction under a force. Its mass pathway (F/m) still responds correctly to written mass, but it doesn't combine friction with force.
-7. **Not yet tested:** a second `compose` seed, `nat` for the `ood-combo` / `compose` designs, and the `nat` ablations. F is not an intervention target, because it is stated in every span.
+   - **Weak composition (2 seeds):** models trained on frictionless-with-force and friction-while-coasting episodes (`compose`) fail on friction and force together. Moving-span loss is 3.1–3.7× their training-part loss; stuck-span loss rises from 0.006 to about 1, since they never saw stiction under a force. Written friction does change their force dynamics, but at only 0.3–0.7× the iid model's strength (src slope 0.24–0.56 vs 0.65–0.78).
+7. **Not yet tested:** `nat` for the `ood-combo` / `compose` designs, and the `nat` ablations. F is not an intervention target, because it is stated in every span.
 
 ## Files
 
@@ -44,6 +44,7 @@ All numbers are best-layer linear-probe scores on held-out episodes. The hidden 
 | `intervene.py` | Interchange interventions on mass or friction (`num` and `nat`): counterfactual pairs (iid / `ood-combo` / `compose` designs), DAS / steering / probe / random directions, greedy-decode and CE scoring with CIs | working |
 | `requirements.txt` | torch ≥ 2.6, numpy, scikit-learn, psutil | |
 | `HANDOFF.md` | How to resume in a new chat | |
+| `writeup_interventions.md` | Draft write-up of the intervention results (R1–R6), with figure specs | draft |
 | `ckpt/*.pt`, `*.log` | Checkpoints and logs (gitignored, local only). Each results section names its files | |
 
 ## Decisions made
@@ -528,6 +529,34 @@ Reading:
   - The mass write still works on these episodes, but the counterfactual difference (F/m_B − F/m_A)·Δt doesn't involve mu. So this tests the F/m pathway only, which was trained.
   - The operator reuses its parts for new values (combo) but not for new combinations of mechanisms (compose).
 
+### Interventions, round 4: friction under force in `compose` models (2026-10-04, RunPod)
+
+Logs (local, gitignored): `r4_cmu_ref.log` (iid model), `r4_cmu_model.log` (`compose` seed 0), `r4_cmu_s1.log` (`compose` seed 1), `train_num_compose_s1.log`, `probe_num_compose_s1_mean.log`. Per-pair outputs: `out/cmu_*.npz`.
+
+New model: `ckpt/num_compose_s1.pt` (`compose`, seed 1, validation loss 0.1467).
+
+Design: `SPLIT=compose TARGET=mu`, k = 32, `pos=all`, 600 test pairs. B is a train-part coasting episode with friction (F = 0), so B's friction varies (0–0.3). Writing friction under a force is the combination the `compose` models never trained on, in both arms:
+- held out: A has friction and force;
+- seen: A is frictionless with force, and friction is switched on.
+
+Effect and IIA on the seen arm are uninformative: A has mu = 0, so any friction, ablation included (0.9), moves v toward the counterfactual. **Read the src slope.**
+
+| `das-steer` (write friction) | L4 slope [CI] | L5 slope [CI] | CE gap L4 / L5 |
+|---|---|---|---|
+| iid model | 0.65 [0.61, 0.69] | 0.78 [0.75, 0.82] | +0.069 / +0.082 |
+| `compose` seed 0 | 0.36 [0.32, 0.40] | 0.56 [0.51, 0.60] | +0.044 / +0.050 |
+| `compose` seed 1 | 0.32 [0.26, 0.38] | 0.24 [0.20, 0.29] | +0.030 / +0.027 |
+
+- Held-out-arm slopes: iid 0.49 / 0.73; `compose` seed 0 0.32 / 0.49; seed 1 0.28 / 0.17.
+- `das` (read) CE gaps are +0.008 to +0.013 for all three models; slopes are about 0.
+
+`compose` seed-1 behaviour (`probe_num_compose_s1_mean.log`): moving-span loss 0.218 on the train part vs **0.670** on the test part (3.1×); stuck 0.006 vs 0.926. This replicates seed 0 (3.7×; stuck 0.006 → 1.08).
+
+Reading:
+- **Composition is partial.** The `compose` models' force dynamics do respond to a written friction value, but only at about 0.3–0.7× the iid model's strength (slope 0.24–0.56 vs 0.65–0.78), and less consistently across layers.
+- **Behaviour fails on both seeds** (3–4× moving-span loss). The failure is mainly elsewhere: the model must infer friction from friction-plus-force text, and handle stiction under a force, neither of which it saw.
+- **Overall:** the operator generalizes to new values and new value combinations (`ood-combo`), but reuses mechanisms learned in separate regimes only weakly (`compose`).
+
 ## Dataset splits (built 2026-10-02)
 
 `sim.SPLITS`, `sim.split_episodes(split, part, n, start_seed)`; `python train.py <ch> <n> <steps> <seed> <split>` trains on the train part only; `python probe.py <ckpt> <n> <pool> <split>` fits probes on the train part and scores them on the test part, and prints next-token loss on both parts.
@@ -540,7 +569,7 @@ Reading:
 | `compose` | mu = 0, or F = 0 throughout (50/50) | mu > 0 and some F ≠ 0 | 100% / 100% | 83% (train part: 51%) |
 
 - Scores on OOD splits are **1 − MSE / Var_train** (targets standardized with the train part's stats), not R². Plain R² on a narrow test region such as m in [3, 5] divides by that region's small variance and goes to −30 even for decent predictions. 1 means perfect; 0 means an error as large as the training spread. Predicting the train mean scores below 0 on a shifted region.
-- `ood-extrap` needs no retraining: existing iid models never saw m > 5 (done; see Results). `ood-combo` is trained on 2 seeds (`ckpt/num_ood-combo.pt`, `ckpt/num_ood-combo_s1.pt`) and `compose` on 1 (`ckpt/num_compose.pt`); see "Interventions, rounds 2–3".
+- `ood-extrap` needs no retraining: existing iid models never saw m > 5 (done; see Results). `ood-combo` is trained on 2 seeds (`ckpt/num_ood-combo.pt`, `ckpt/num_ood-combo_s1.pt`) and `compose` on 2 (`ckpt/num_compose.pt`, `ckpt/num_compose_s1.pt`); see "Interventions, rounds 2–4".
 - Not built: the `cross-channel` split. It needs mixed-channel training in `train.py`, and probes fit on one channel and scored on another.
 
 ## Known issues and open questions
@@ -555,13 +584,13 @@ Reading:
 - Interventions:
   - The DAS read effect is small (CE gap 0.007–0.018 across seeds, CIs exclude 0).
   - On held-out `combo` rows, the src slope and CE gap are uninformative (narrow source range). Use effect and IIA there.
-  - The mass write test on `compose` doesn't involve mu, so it can't show composition. A mu write test on `compose` would.
+  - The mass write test on `compose` doesn't involve mu, so it can't show composition; the mu write test (round 4) does.
+  - On `compose` with `TARGET=mu`, effect and IIA on the seen arm are uninformative (A is frictionless). Use the src slope.
   - `das-steer` at k = 8 failed to train once (`BSRC=fc`, L4: loss above `das`), so check training losses before reading a row.
   - Greedy decoding of `num` sometimes emits an unexpected step; about 5–10% of pairs are dropped per condition.
 
 ## Not built yet
 
-- A mu write test on the `compose` model, and a second `compose` seed.
 - Interventions for the `nat` `ood-combo` / `compose` designs (needs `nat` models trained on those splits).
 - A wide-mass reference model for `ood-extrap`.
 - The `cross-channel` split (mixed-channel training, with probes fit on one channel and scored on another).
