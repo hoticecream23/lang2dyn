@@ -4,6 +4,8 @@ python train.py [channel=num] [n_episodes=100000] [steps=5000] [seed=0] [split=i
     -> ckpt/<channel>[_<split>][_s<seed>].pt   (split and seed suffixes only when not iid / 0)
 split (see sim.SPLITS): trains and validates on that split's train part only.
 seed sets weight init and batch order only; the training episodes are the same for every seed.
+Env SIZE=layers,d,heads (default 6,256,8) trains a different size, saved with a _L<layers>d<d> suffix; env LR sets the
+peak learning rate (default 1e-3).
 Rerun the same command after an interruption to resume from the last 500-step save.
 """
 import math, os, sys, time
@@ -80,7 +82,9 @@ def main():
     channel, n, steps, seed, split = (sys.argv[1:] + [None] * 5)[:5]
     channel, n, steps, seed, split = channel or "num", int(n or 100_000), int(steps or 5000), int(seed or 0), split or "iid"
     torch.manual_seed(seed)
-    name = channel + (f"_{split}" if split != "iid" else "") + (f"_s{seed}" if seed else "")
+    layers, d, heads = map(int, os.environ.get("SIZE", "6,256,8").split(","))
+    name = (channel + (f"_{split}" if split != "iid" else "") + (f"_s{seed}" if seed else "")
+            + (f"_L{layers}d{d}" if (layers, d) != (6, 256) else ""))
     texts = lambda count, start: [e["texts"][channel]["text"] for e in sim.split_episodes(split, "train", count, start)]
     t0 = time.time()
     train_t, val_t = texts(n, 0), texts(2000, VAL_SEED)
@@ -88,12 +92,12 @@ def main():
     stoi = {c: i + 3 for i, c in enumerate(chars)}
     # context length from the data, with headroom for longer held-out episodes (num ~576, nat/qual ~1536)
     block = 64 * math.ceil(1.25 * (max(map(len, train_t)) + 2) / 64)
-    model = GPT(len(chars) + 3, block=block).cuda()
+    model = GPT(len(chars) + 3, block=block, d=d, layers=layers, heads=heads).cuda()
     X, V = encode(train_t, stoi, model.cfg["block"]), encode(val_t, stoi, model.cfg["block"]).cuda()
     print(f"{name}: {n} episodes, vocab {len(chars) + 3}, {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M params, "
           f"data {time.time() - t0:.0f}s", flush=True)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-3, betas=(0.9, 0.95), weight_decay=0.1)
+    opt = torch.optim.AdamW(model.parameters(), lr=float(os.environ.get("LR", 1e-3)), betas=(0.9, 0.95), weight_decay=0.1)
     lr = lambda s: min(1, s / 200) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * s / steps)))
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lr)
 

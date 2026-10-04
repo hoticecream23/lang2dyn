@@ -37,6 +37,9 @@ Env SPLIT (pair design; DAS always trains on non-held-out pairs):
            seen = A is a train-part episode (mu = 0). B is a train-part episode: frictionless for TARGET=m, force-free (coasting
            with friction) for TARGET=mu, so B's value varies. Test set half held out.
 Env RANDOM=1: use a random-init model with the checkpoint's shapes (control; it can't decode, so read the CE gap).
+Env CLAMP=K: das-steer writes mean + K * sd * tanh(alpha * f(z) + beta), bounded to +-K natural spreads of the source
+  values in the subspace (an on-manifold write). The log prints the written values' spread / the natural spread.
+Env MULTI=2,3,4,5: patch these layers at once (one learned subspace each) instead of one layer at a time.
 Env OUT=path.npz: save per-pair outputs (decoded v, target CE) for every condition.
 """
 import math, os, random, sys
@@ -61,6 +64,8 @@ BSRC = os.environ.get("BSRC", "last")  # B's source span: its last span up to r0
 SPLIT = "combo" if os.environ.get("COMBO") == "1" else os.environ.get("SPLIT", "iid")
 assert SPLIT in ("iid", "combo", "compose") and (SPLIT != "combo" or TARGET == "m")
 RANDOM = os.environ.get("RANDOM") == "1"
+CLAMP = float(os.environ.get("CLAMP", 0))  # das-steer bounded to +-CLAMP natural spreads (0: unbounded)
+MULTI = os.environ.get("MULTI", "")  # e.g. "2,3,4,5": patch these layers together (one subspace each) instead of LAYERS
 CH = "num"  # set from the checkpoint in main
 
 
@@ -157,28 +162,43 @@ def source_acts(model, pairs, stoi):
     return torch.stack(out, 1)
 
 
-def overwrite(model, L, U, c, start):
-    """Hook: at layer L's output, set the coordinates in orthonormal basis U (d, k) to c (n, k), at positions
-    start[:, 0] <= t < start[:, 1]."""
-    def hook(mod, inp, out):
-        t = torch.arange(out.shape[1], device=out.device)[None]
-        keep = ((t >= start[:, :1]) & (t < start[:, 1:])).float()[..., None]
-        return out + keep * ((c[:, None] - out @ U) @ U.T)
-    return model.blocks[L - 1].register_forward_hook(hook)
+def overwrite(model, Ls, U, c, start):
+    """Hooks: at the output of each layer Ls[j], set the coordinates in orthonormal basis U[j] (d, k) to c[:, j] (n, k),
+    at positions start[:, 0] <= t < start[:, 1]. -> hook handles"""
+    def make(j):
+        def hook(mod, inp, out):
+            t = torch.arange(out.shape[1], device=out.device)[None]
+            keep = ((t >= start[:, :1]) & (t < start[:, 1:])).float()[..., None]
+            return out + keep * ((c[:, j, None] - out @ U[j]) @ U[j].T)
+        return hook
+    return [model.blocks[L - 1].register_forward_hook(make(j)) for j, L in enumerate(Ls)]
 
 
-def train_das(model, L, ids, n_prompt, hB, start, k=1, z=None, steps=800, bs=32, seed=0):
-    """ids: list of prompt + target token lists; loss on the target tokens only.
-    c = hB @ U, or with z given (steer mode) c = alpha * z + beta (alpha, beta in R^k). -> U, (alpha, beta), final loss"""
+project = lambda h, U: torch.einsum("nld,ldk->nlk", h, U)  # (n, layers, d) x (layers, d, k) -> (n, layers, k)
+
+
+def steer_code(z, ab, U, hB):
+    """Written value per row and layer: alpha * z + beta. With CLAMP = K it is bounded to the natural range instead:
+    mean + K * sd * tanh(alpha * z + beta), with mean / sd of the natural values hB @ U over the training sources."""
+    raw = z[:, None, None] * ab[0] + ab[1]
+    if not CLAMP:
+        return raw
+    nat = project(hB, U).detach()
+    return nat.mean(0) + CLAMP * nat.std(0) * torch.tanh(raw)
+
+
+def train_das(model, Ls, ids, n_prompt, hB, start, k=1, z=None, steps=800, bs=32, seed=0):
+    """ids: list of prompt + target token lists; loss on the target tokens only. hB: (n, len(Ls), d) source activations.
+    c = hB @ U per layer, or with z given (steer mode) c = steer_code(z). -> U (len(Ls), d, k), (alpha, beta), final loss"""
     g = torch.Generator().manual_seed(seed)
-    u = torch.nn.Parameter(torch.randn(hB.shape[-1], k, generator=g).cuda())
-    ab = torch.nn.Parameter(torch.stack([torch.ones(k), torch.zeros(k)]).cuda())
+    u = torch.nn.Parameter(torch.randn(len(Ls), hB.shape[-1], k, generator=g).cuda())
+    ab = torch.nn.Parameter(torch.stack([torch.ones(len(Ls), k), torch.zeros(len(Ls), k)]).cuda())
     opt = torch.optim.Adam([u, ab], lr=1e-2)
     for _ in range(steps):
-        idx = torch.randint(len(ids), (bs,), generator=g)
+        idx = torch.randint(len(ids), (bs,), generator=g).cuda()
         un = torch.linalg.qr(u)[0]
-        c = hB[idx.cuda()] @ un if z is None else z[idx.cuda(), None] * ab[0] + ab[1]
-        loss = target_ce(model, ids, n_prompt, idx.tolist(), (L, un, c, start[idx.cuda()])).mean()
+        c = project(hB[idx], un) if z is None else steer_code(z[idx], ab, un, hB)
+        loss = target_ce(model, ids, n_prompt, idx.tolist(), (Ls, un, c, start[idx])).mean()
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -193,10 +213,10 @@ def target_ce(model, ids, n_prompt, idx, patch=None):
     for b, i in enumerate(idx):
         X[b, :len(ids[i])] = torch.tensor(ids[i])
         y[b, n_prompt[i] - 1:len(ids[i]) - 1] = X[b, n_prompt[i]:len(ids[i])]
-    h = overwrite(model, *patch) if patch else None
+    hooks = overwrite(model, *patch) if patch else []
     with torch.autocast("cuda", torch.bfloat16):
         logits = model(X[:, :-1].cuda())
-    if h:
+    for h in hooks:
         h.remove()
     y = y.cuda()
     return F.cross_entropy(logits.float().transpose(1, 2), y, reduction="none").sum(1) / (y != -100).sum(1)
@@ -229,7 +249,7 @@ def decode(model, prompts, itos, L=None, u=None, c=None, start=None):
         X = torch.full((len(P), max(map(len, P)) + max_new), PAD).cuda()
         for b, p in enumerate(P):
             X[b, :len(p)] = torch.tensor(p)
-        h = overwrite(model, L, u, c[i:i + 64], start[i:i + 64]) if L else None
+        hooks = overwrite(model, L, u, c[i:i + 64], start[i:i + 64]) if L else []
         done, text = [False] * len(P), [""] * len(P)
         for _ in range(max_new):
             nxt = model(X[:, :int(cur.max())])[torch.arange(len(P)), cur - 1].argmax(-1)
@@ -242,7 +262,7 @@ def decode(model, prompts, itos, L=None, u=None, c=None, start=None):
             cur += 1
             if all(done):
                 break
-        if h:
+        for h in hooks:
             h.remove()
         outs += [t.strip() for t in text]
     return outs
@@ -332,51 +352,58 @@ def main():
     ids_test, np_test = [a + enc(p["target"]) for a, p in zip(pA, test)], [len(a) for a in pA]
     saved = {}
 
-    def ces(name, L, u, c, both=True):
-        a = test_ce(model, ids_test, np_test, (L, u, c, start_test))
-        saved[f"L{L}_{name}_ce"] = a
+    tag = lambda Ls: "L" + "+".join(map(str, Ls))
+
+    def ces(name, Ls, u, c, both=True):
+        a = test_ce(model, ids_test, np_test, (Ls, u, c, start_test))
+        saved[f"{tag(Ls)}_{name}_ce"] = a
         if not both:
             return f" || target CE {a.mean():.3f}"
-        b = test_ce(model, ids_test, np_test, (L, u, c[second], start_test))
-        saved[f"L{L}_{name}_ce2"] = b
+        b = test_ce(model, ids_test, np_test, (Ls, u, c[second], start_test))
+        saved[f"{tag(Ls)}_{name}_ce2"] = b
         g, lo, hi = boot_ci(b - a)
         parts = " ".join(f"{t} {(b - a)[m].mean():+.3f}" for t, m in (("held", hold), ("seen", ~hold)))
         return f" || target CE {a.mean():.3f}, source B' {b.mean():.3f}, gap {g:+.3f} [{lo:+.3f},{hi:+.3f}] ({parts})"
 
-    def run(name, L, u, c):
-        v = decoded_v(decode(model, pA, itos, L, u, c, start_test), test)
-        saved[f"L{L}_{name}"] = v
+    def run(name, Ls, u, c):
+        v = decoded_v(decode(model, pA, itos, Ls, u, c, start_test), test)
+        saved[f"{tag(Ls)}_{name}"] = v
         return v
 
     v_clean = decoded_v(decode(model, pA, itos), test)
     held_desc = {"iid": f"{TARGET}_B in {HOLD}", "combo": "combo region", "compose": "compose test part"}[SPLIT]
     print(f"{path}: channel {CH}, target {TARGET}, split {SPLIT}, k={k}, pos={pos}, src={SRC}, bid={BID}, bsrc={BSRC}, "
-          f"random={RANDOM}, {len(train)} DAS train pairs, {len(test)} test pairs ({hold.sum()} held out: {held_desc}), "
+          f"random={RANDOM}, clamp={CLAMP}, multi={MULTI or None}, {len(train)} DAS train pairs, {len(test)} test pairs ({hold.sum()} held out: {held_desc}), "
           f"median |v_cf - v_A| {np.median([abs(p['vcf'] - p['vA']) for p in test]):.3f}")
     clean_ce = test_ce(model, ids_test, np_test)
     report("clean", v_clean, None, v_clean, test, vcf2, hold, f" || target CE {clean_ce.mean():.3f}")
     saved.update(clean=v_clean, clean_ce=clean_ce, held=hold, vA=[p["vA"] for p in test], vcf=[p["vcf"] for p in test], vcf2=vcf2)
-    for L in LAYERS:
-        u_das, _, loss = train_das(model, L, ids, n_prompt, hB_train[L], start_train, k)
-        u_shuf, _, loss_shuf = train_das(model, L, ids, n_prompt, hB_train[L][perm], start_train, k)
-        u_st, ab, loss_st = train_das(model, L, ids, n_prompt, hB_train[L], start_train, k, z_train)
+    groups = [tuple(map(int, MULTI.split(",")))] if MULTI else [(L,) for L in LAYERS]
+    for Ls in groups:
+        hB_tr, hB_te = hB_train[list(Ls)].transpose(0, 1), hB_test[list(Ls)].transpose(0, 1)  # (n, layers, d)
+        u_das, _, loss = train_das(model, Ls, ids, n_prompt, hB_tr, start_train, k)
+        u_shuf, _, loss_shuf = train_das(model, Ls, ids, n_prompt, hB_tr[perm], start_train, k)
+        u_st, ab, loss_st = train_das(model, Ls, ids, n_prompt, hB_tr, start_train, k, z_train)
         dirs = {"das": u_das, "das-shuf": u_shuf}
-        overlap = lambda a, b: float(torch.linalg.svdvals(a.T @ b).max())  # 1 = the subspaces share a direction
+        # 1 = the subspaces share a direction (mean over the patched layers)
+        overlap = lambda a, b: float(np.mean([torch.linalg.svdvals(a[j].T @ b[j]).max().item() for j in range(len(Ls))]))
         note = ""
-        if k == 1:
-            dirs["probe"] = torch.tensor(probes[L - 1] / np.linalg.norm(probes[L - 1]), dtype=torch.float32).cuda()[:, None]
+        if k == 1 and len(Ls) == 1:
+            w = probes[Ls[0] - 1]
+            dirs["probe"] = torch.tensor(w / np.linalg.norm(w), dtype=torch.float32).cuda()[None, :, None]
             note = f"; |cos| with probe: das {overlap(u_das, dirs['probe']):.2f}, steer {overlap(u_st, dirs['probe']):.2f}"
-        dirs["random"] = torch.linalg.qr(torch.randn(len(u_das), k, generator=torch.Generator().manual_seed(L)))[0].cuda()
-        print(f"L{L}: train loss das {loss:.3f}, das-shuf {loss_shuf:.3f}, das-steer {loss_st:.3f}{note}; "
-              f"overlap(das, steer) {overlap(u_das, u_st):.2f}")
+        dirs["random"] = torch.linalg.qr(torch.randn(len(Ls), u_das.shape[1], k, generator=torch.Generator().manual_seed(Ls[0])))[0].cuda()
+        c_st = steer_code(z_test, ab, u_st, hB_tr)
+        amp = float((c_st.std(0) / project(hB_te, u_st).std(0)).mean())  # spread of the written values / natural spread
+        print(f"{tag(Ls)}: train loss das {loss:.3f}, das-shuf {loss_shuf:.3f}, das-steer {loss_st:.3f}{note}; "
+              f"overlap(das, steer) {overlap(u_das, u_st):.2f}; das-steer spread / natural spread {amp:.2f}")
         for name, u in dirs.items():
-            c = hB_test[L] @ u
-            report(name, run(name, L, u, c), run(name + "_B2", L, u, c[second]), v_clean, test, vcf2, hold, ces(name, L, u, c))
-        c = (hB_train[L] @ u_das).mean(0).expand(len(test), k)
-        report("ablate", run("ablate", L, u_das, c), None, v_clean, test, vcf2, hold, ces("ablate", L, u_das, c, False))
-        c = z_test[:, None] * ab[0] + ab[1]
-        report("das-steer", run("das-steer", L, u_st, c), run("das-steer_B2", L, u_st, c[second]), v_clean, test, vcf2,
-               hold, ces("das-steer", L, u_st, c))
+            c = project(hB_te, u)
+            report(name, run(name, Ls, u, c), run(name + "_B2", Ls, u, c[second]), v_clean, test, vcf2, hold, ces(name, Ls, u, c))
+        c = project(hB_tr, u_das).mean(0).expand(len(test), len(Ls), k)
+        report("ablate", run("ablate", Ls, u_das, c), None, v_clean, test, vcf2, hold, ces("ablate", Ls, u_das, c, False))
+        report("das-steer", run("das-steer", Ls, u_st, c_st), run("das-steer_B2", Ls, u_st, c_st[second]), v_clean, test,
+               vcf2, hold, ces("das-steer", Ls, u_st, c_st))
         if os.environ.get("OUT"):
             np.savez(os.environ["OUT"], **{key: np.asarray(val) for key, val in saved.items()})
 

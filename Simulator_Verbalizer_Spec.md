@@ -1,4 +1,4 @@
-# Simulator and Verbalizer Spec (v1, matches the code as of 2026-10-02)
+# Simulator and Verbalizer Spec (v1, matches the code as of 2026-10-04)
 
 Goal: one simulator produces ground-truth trajectories `z_{1:T}`. Several verbalizers `g_i` turn the **same** trajectory into different texts `L_i`. Models train only on text. Every span of text links back to its ground-truth state, so we can probe and intervene.
 
@@ -112,7 +112,7 @@ The headline probes are the **I** cells: variables never written in the text but
 ## 3. Data and model
 
 - 100k training episodes (seeds 0..99999) per channel. Validation: 2000 episodes from seed 10M. Probes: seeds 20M+. Ceiling: seeds 30M+. Code vocab for the `qual`/`rel` baselines: seeds 40M+.
-- Model: char-level GPT from scratch, 6 layers, d = 256, 8 heads, about 5M params. One episode per sequence; context length set from the data (576 tokens for `num`, 1472 for `nat`).
+- Model: char-level GPT from scratch, 6 layers, d = 256, 8 heads, about 5M params (default; one 38M model, 12 layers and d = 512, via `train.py`'s `SIZE`). One episode per sequence; context length set from the data (576 tokens for `num`, 1472 for `nat`).
 - One character tokenizer shared by all channels (no BPE), so the tokenizer is not a confound between channels.
 - Text length differs by channel (mean characters: `num` 351, `qual` 712, `rel` 736, `nat` 874). Longer channels give the model more compute per episode, so this is a confound to report.
 
@@ -130,9 +130,9 @@ OOD scores are 1 − MSE/Var_train. Model behavior is judged by next-token loss 
 
 ### Counterfactual pairs
 
-`make_episode(seed, m=…)` (or `mu=…`, `F_segments=…`) regenerates an episode with one change and the same seed. Such whole-episode twins differ from t = 0, so their texts don't share a prefix.
+`make_episode(seed, m=…)` (or `mu=…`, `F_segments=…`) regenerates an episode with one change and the same seed. Such whole-episode twins have different dynamics from the start, so their texts diverge after the first span.
 
-`make_episode(seed, m_switch=[r0, m])` (or `mu_switch=[r0, mu]`) changes the mass (friction) at recorded step r0: the state at r0 is unchanged, and the dynamics from r0 on use the new mass. Its text is identical to the original up to step r0. These are the targets for interchange interventions (`intervene.py`): patch a mass representation from episode B into episode A's prefix (up to r0), let the model continue, and compare with the simulator's A-with-B's-mass.
+`make_episode(seed, m_switch=[r0, m])` (or `mu_switch=[r0, mu]`) changes the mass (friction) at recorded step r0: the state at r0 is unchanged, and the dynamics from r0 on use the new mass. Its text is identical to the original up to step r0, unless the regime or an event at r0 itself changes (a start/stop, which `nat` states); `intervene.py` drops such pairs. These are the targets for interchange interventions (`intervene.py`): patch a mass representation from episode B into episode A's prefix (up to r0), let the model continue, and compare with the simulator's A-with-B's-mass.
 
 ---
 
@@ -174,7 +174,7 @@ They are used for the `qual`/`rel` observables baselines, and later for generati
 2. ✅ `num`, `nat`, `qual`, `rel`, `sym` verbalizers with parsers and round-trip checks.
 3. ✅ Training on each channel; probes with baselines and ceiling; 3 seeds for `num` and `nat`.
 4. ✅ Dataset splits; `ood-extrap` evaluated with the existing models.
-5. 🟨 Training on `ood-combo` (`num`, seeds 0–1) and `compose` (`num`, seed 0) done; a wide-mass reference model (not built).
-6. ✅ Interchange interventions on counterfactual pairs: `intervene.py` (`num` and `nat`; mass and friction via `m_switch` / `mu_switch`; probe directions, DAS, steering; shuffled / random-init controls; iid / `ood-combo` / `compose` pair designs; bootstrap and Theil–Sen CIs). F is not a target (it is stated).
+5. 🟨 Training on `ood-combo` (`num`, seeds 0–1) and `compose` (`num`, seeds 0–1) done; a 38M `num` model (seed 0); a wide-mass reference model (not built).
+6. ✅ Interchange interventions on counterfactual pairs: `intervene.py` (`num` and `nat`; mass and friction via `m_switch` / `mu_switch`; probe directions, DAS, steering; shuffled / random-init controls; iid / `ood-combo` / `compose` pair designs; bounded writes (`CLAMP`); multi-layer patching (`MULTI`); bootstrap and Theil–Sen CIs). F is not a target (it is stated).
 7. ⬜ `nat` ablations, `cross-channel` split.
 8. ⬜ Phase 2 (collisions).

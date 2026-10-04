@@ -1,6 +1,6 @@
 # Do language models trained on trajectory text use the physics they encode? — intervention results (draft)
 
-Draft of the operator half of the project: interchange interventions on small char-level GPTs trained from scratch on verbalized 1-D cart dynamics. Numbers come from `PROJECT_STATE.md` (intervention sections, rounds 1–3); logs are local (`das_*.log`, `r2_*.log`, `r3_*.log`, `out/*.npz`). Status: first draft, 2026-10-04.
+Draft of the operator half of the project: interchange interventions on small char-level GPTs trained from scratch on verbalized 1-D cart dynamics. Numbers come from `PROJECT_STATE.md` (intervention sections, rounds 1–5); logs are local (`das_*.log`, `r2_*.log`, `r3_*.log`, `r4_*.log`, `r5_*.log`, `out/*.npz`). Status: draft, 2026-10-04 (rounds 1–5).
 
 ## 1. Question and setup
 
@@ -41,6 +41,14 @@ Erasing A's value already moves predictions toward a random B (regression to the
 - **The model combines the written value with F.** The written value depends only on z_B, but the required change depends on the sign and size of F in each pair.
 - **It works through attention.** Patching only the prompt span (not the generated tokens) still works (slope 0.45, r 0.72 at k = 8; round-1 slope-through-0 metric).
 - **It interpolates** to mass values never used in training (held-out band [2, 3] kg).
+- **It is not an off-manifold artifact.** With the written value bounded to the natural range (CLAMP; `num` seed 0, L4):
+
+| bound | written spread / natural | slope [95% CI] |
+|---|---|---|
+| ±1 sd | 0.62× | 0.59 [0.56, 0.62] |
+| ±2 sd | 0.91× | 0.80 [0.77, 0.82] |
+| ±3 sd | 1.06× | 0.89 [0.87, 0.91] |
+| unbounded | | 0.91 [0.88, 0.93] |
 
 **R4. The natural value is not swappable.** Interchange from B's own activations transfers little:
 
@@ -53,8 +61,9 @@ Erasing A's value already moves predictions toward a random B (regression to the
 | friction (L4) | +0.004 | +0.001 | 0.00 |
 
 - The effect is statistically real for mass in `num`, but small. It grows with subspace width (k = 64: slope 0.28) and needs every position patched.
-- The subspace the model reads (found by the write) overlaps the DAS subspace at 0.99, and B's natural activations in it do carry mass (R² 0.48 at k = 8). But the write uses about 5× the natural spread.
-- **Reading:** the parameter is represented redundantly, across positions and many dimensions. The subspace the model reads can be driven, but a natural-scale swap within it can't override the remaining copies.
+- The subspace the model reads (found by the write) overlaps the DAS subspace at 0.99 (k = 32). B's natural activations in it do carry mass: at k = 8, log m R² 0.48 (a one-off diagnostic, not logged).
+- **Redundancy across layers explains most of the gap.** Swapping B's natural activations at four layers at once (L2–L5, one 32-D subspace each) transfers 0.47 [0.43, 0.50] (CE gap +0.085), against 0.14 at L4 alone. The shuffled control stays at 0.
+- **Reading:** the parameter is represented redundantly, across layers and many dimensions. A swap at one layer is undone by the copies at the others.
 
 **R5. Computation, not lookup.** `num` models trained without the combination m ∈ [3, 5] with |F| ≥ 7 (`ood-combo`; 2 seeds). Writing m_B in that range under such a force:
 
@@ -68,7 +77,7 @@ On real held-out-combination episodes, the `ood-combo` model's moving-span loss 
 
 **R6. Weak compositional reuse.** `num` models (2 seeds) are trained on frictionless episodes with forces plus friction-only coasting episodes (`compose`), and tested on friction and force together.
 - **Behaviour fails on both seeds.** Moving-span loss is 3.7× / 3.1× the training level (0.765 vs 0.209; 0.670 vs 0.218). The iid model scores 0.264 on both parts, so the test episodes are not intrinsically harder. Stuck-span loss rises from 0.006 to 1.08 / 0.93: the models never saw stiction holding a cart against a force.
-- **Mass write:** it still works there (0.82), but that tests only the trained F/m pathway, since μ cancels in the mass counterfactual.
+- **Mass write** (seed 0 only): it still works there (0.82), but that tests only the trained F/m pathway, since μ cancels in the mass counterfactual.
 - **Friction write:** writing friction under a force is the untrained combination. Source slope [95% CI]:
 
 | model | L4 | L5 |
@@ -79,18 +88,25 @@ On real held-out-combination episodes, the `ood-combo` model's moving-span loss 
 
 The friction variable reaches the force dynamics, but at only 0.3–0.7× the strength of a model trained on the combination.
 
+**R7. The pattern holds at 8× scale.** A 38M-parameter model (12 layers, d = 512; validation loss 0.185 vs 0.213) extracts more (log m 0.733, μ 0.475 vs 0.707 / 0.385). It has the same structure:
+- a mid-depth write channel: L6 0.46, **L8 0.81 [0.79, 0.83]**, L10 0.15;
+- the same weak single-layer read: L8 slope 0.03, CE gap +0.010 vs +0.002 shuffled.
+
 ## 3. Interpretation
 
 Next-token prediction on trajectory text yields an internal dynamics computation that reads hidden parameters: written values propagate correctly through F-dependent updates and interpolate to unseen values and unseen value combinations. The parameters are not stored as a single swappable variable. The probe-decodable direction is not the one the computation uses, and natural representations are distributed and redundant. The learned operator generalizes over *values* (lookup is ruled out), but only weakly over *mechanisms*. Friction and force learned in separate regimes are combined at reduced strength, and behaviour on the combination fails.
 
 ## 4. Caveats
 
-- **Small models, one architecture, one simulator.** The k = 32 subspace is about 1/8 of the residual width.
-- **The write effects use off-manifold amplitudes**: about 5× the natural spread at k = 8.
+- **Small models, one architecture, one simulator.** 5M and 38M parameters (the 38M model: one seed, `num` mass only). The k = 32 subspace is 1/8 (1/16) of the residual width.
+- **Write amplitude:** the round-1 writes used about 5× the natural spread (k = 8). Bounded writes (R3) remove this concern for mass in `num`; they are not yet repeated for `nat` / friction.
 - **`compose` and `ood-combo` are single-channel (`num`), 2 seeds each.**
 - **The held-out regions interpolate within the trained ranges** (a new combination, not new values). `ood-extrap` (new values) is tested only behaviourally.
 - **DAS can find directions in any network.** The shuffled-source and random-init controls guard against this here.
-- **Related work** (to verify before citing): Vafa et al. 2025 on inductive-bias probes of orbital mechanics; Othello-GPT; Li, Nye, Andreas 2021; Geiger et al. on DAS / causal abstraction.
+- **A subspace patch can activate a dormant pathway** rather than the model's natural mechanism (Makelov et al., ICLR 2024; disputed by Wu, Geiger et al., arXiv 2401.12631). The write-channel claim is therefore stated as *sufficiency under intervention*: the model's downstream dynamics can use a value supplied there.
+  - Two results go beyond that: bounded writes within the natural range work (R3), and swapping the model's own activations at four layers transfers 0.47 (R4). Both suggest the natural computation uses this pathway.
+  - A single-layer natural swap stays weak, so the subspace is not shown to be the model's only storage site.
+- **Related work:** verified bibliography, citation audit of `project_idea.md`, and a draft related-work section in `related_work.md`. Probe-vs-causal dissociation is known in general (Hewitt & Liang; Ravichander et al.; Elazar et al.; Tan et al. 2026). What looks new is the combination: a text-only continuous physical domain with known hidden parameters, held-out combination and composition tests, and the regression-to-the-mean correction for IIA.
 
 ## 5. Figures
 
@@ -101,3 +117,4 @@ Made by `python make_figures.py` from the intervention logs (local) into `figure
 3. `figures/fig3_layers.png`: write slope by layer (L3–L5) for `nat` mass and `num` friction; the read is about 0 at every layer.
 4. `figures/fig4_combo.png`: `ood-combo`. Write effect on held-out vs seen pairs for 2 seeds and the iid model, with ablation as baseline. (R5.)
 5. `figures/fig5_compose.png`: `compose`. Left: moving-span loss on the train vs test part for the iid model and both `compose` seeds. Right: friction-write source slope at L4 / L5. (R6.)
+6. `figures/fig6_robustness.png`: bounded writes (slope vs bound), single- vs four-layer natural swap, and the 38M model's write and read by layer. (R3, R4, R7.)

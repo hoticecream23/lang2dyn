@@ -28,7 +28,7 @@ def parse(path):
     """-> {(layer, condition, group): dict(effect, iia, slope, lo, hi, gap, glo, ghi)}"""
     out, L = {}, 0
     for line in open(path, encoding="utf-8"):
-        if m := re.match(r"^L(\d):", line):
+        if m := re.match(r"^L(\d+)[:+]", line):  # "L4:", "L10:", "L2+3+4+5:" (a group is keyed by its first layer)
             L = int(m[1])
         if not ROW.match(line):
             continue
@@ -196,7 +196,46 @@ def fig5_compose():
     save(fig, "fig5_compose")
 
 
+def fig6_robustness():
+    """On-manifold writes, multi-layer interchange, and the 38M model."""
+    fig, axes = plt.subplots(1, 3, figsize=(13, 3.2))
+    ax = axes[0]
+    rows = []
+    for K in (1, 2, 3):
+        d = parse(f"r5_clamp{K}.log")[(4, "das-steer", "all")]
+        amp = float(re.search(r"spread / natural spread (\S+)", open(f"r5_clamp{K}.log", encoding="utf-8").read())[1])
+        rows.append((f"±{K} sd\n{amp:.2f}×", {"write, bounded": (d["slope"], d["lo"], d["hi"])}))
+    d = parse("r3_ci_s0.log")[(4, "das-steer", "all")]
+    rows.append(("unbounded", {"write, bounded": (d["slope"], d["lo"], d["hi"])}))
+    dot_rows(ax, rows, [("write, bounded", BLUE)], "source slope", ref=0)
+    ax.set(ylim=(0, 1), title="Writes inside the natural range still work", xlabel="bound; spread of written values vs natural")
+    ax.legend().remove()
+    ax = axes[1]
+    single, multi = parse("r3_ci_s0.log"), parse("r5_multi.log")
+    rows = [("one layer\n(L4)", {s: (single[(4, n, "all")]["slope"], single[(4, n, "all")]["lo"], single[(4, n, "all")]["hi"])
+                                 for s, n in (("read", "das"), ("read, shuffled", "das-shuf"))}),
+            ("four layers\n(L2–L5)", {s: (multi[(2, n, "all")]["slope"], multi[(2, n, "all")]["lo"], multi[(2, n, "all")]["hi"])
+                                       for s, n in (("read", "das"), ("read, shuffled", "das-shuf"))})]
+    dot_rows(ax, rows, [("read", ORANGE), ("read, shuffled", MUTED)], "source slope", ref=0)
+    ax.set(ylim=(-0.05, 1), title="Swapping natural values needs several layers")
+    ax.legend(loc="upper left")
+    ax = axes[2]
+    big = parse("r5_big.log")
+    Ls = [6, 8, 10]
+    for name, col, lab in (("das-steer", BLUE, "write"), ("das", ORANGE, "read")):
+        v = np.array([big[(L, name, "all")]["slope"] for L in Ls])
+        lo, hi = np.array([big[(L, name, "all")]["lo"] for L in Ls]), np.array([big[(L, name, "all")]["hi"] for L in Ls])
+        ax.fill_between(Ls, lo, hi, color=col, alpha=0.12, lw=0)
+        ax.plot(Ls, v, "-o", color=col, lw=2, label=lab, **MARK)
+    ax.axhline(0, color=AXIS, lw=1)
+    ax.set(xticks=Ls, xticklabels=[f"L{L}" for L in Ls], xlabel="patched layer (of 12)", ylabel="source slope", ylim=(-0.05, 1),
+           title="38M model: same pattern at mid-depth")
+    ax.legend(loc="upper right")
+    fig.text(0.5, -0.12, "num, mass, k = 32, every position, 1000 held-out pairs; Theil–Sen 95% CI", ha="center", color=MUTED, fontsize=8)
+    save(fig, "fig6_robustness")
+
+
 if __name__ == "__main__":
-    for f in (fig1_pair, fig2_write_read, fig3_layers, fig4_combo, fig5_compose):
+    for f in (fig1_pair, fig2_write_read, fig3_layers, fig4_combo, fig5_compose, fig6_robustness):
         f()
         print("made", f.__name__)
